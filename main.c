@@ -32,6 +32,7 @@ typedef struct {
 #define EV_CURRENT 1
 #define PT_LOAD 1
 #define PF_R 4
+#define PF_W 2
 #define PF_X 1
 #else
 #include <elf.h>
@@ -53,13 +54,16 @@ static void die(const char *msg, int line) {
 
 typedef enum {
     TOK_LET, TOK_PRINT, TOK_IF, TOK_ELSE, TOK_WHILE, TOK_RETURN, TOK_FUNC,
-    TOK_SIZEOF, TOK_INT,
+    TOK_SIZEOF, TOK_INT, TOK_CHAR, TOK_CONST,
+    TOK_STR,
     TOK_IDENTIFIER, TOK_NUMBER,
     TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH,
     TOK_AMP, TOK_LBRACKET, TOK_RBRACKET,
     TOK_ASSIGN, TOK_EQ, TOK_NE, TOK_LT, TOK_GT, TOK_LE, TOK_GE,
     TOK_SEMICOLON, TOK_COMMA,
     TOK_LPAREN, TOK_RPAREN, TOK_LBRACE, TOK_RBRACE,
+    TOK_PERCENT, TOK_ANDAND, TOK_OROR,
+    TOK_PLUS_EQ, TOK_MINUS_EQ, TOK_STAR_EQ, TOK_SLASH_EQ, TOK_PERCENT_EQ, TOK_NOT,
     TOK_EOF, TOK_ERROR
 } TokenType;
 
@@ -71,36 +75,48 @@ static Token tok(TokenType t, const char *s, int len, int line) {
     return tk;
 }
 
-static const char *KWD[] = { "let", "print", "if", "else", "while", "return", "func", "sizeof", "int" };
+static const char *KWD[] = { "let", "print", "if", "else", "while", "return", "func", "sizeof", "int", "char", "const" };
 
 static const uint64_t PUNCT_BIT[2] = {
-    (1ULL << 33) | (1ULL << 38) | (1ULL << 40) | (1ULL << 41) | (1ULL << 42) | (1ULL << 43) |
+    (1ULL << 33) | (1ULL << 37) | (1ULL << 38) | (1ULL << 40) | (1ULL << 41) | (1ULL << 42) | (1ULL << 43) |
     (1ULL << 44) | (1ULL << 45) | (1ULL << 47) | (1ULL << 59) |
-    (1ULL << 60) | (1ULL << 61) | (1ULL << 62), 
-    (1ULL << 27) | (1ULL << 29) | (1ULL << 59) | (1ULL << 61),              
+    (1ULL << 60) | (1ULL << 61) | (1ULL << 62),
+    (1ULL << 27) | (1ULL << 29) | (1ULL << 59) | (1ULL << 60) | (1ULL << 61),
 };
 
 static const uint64_t PAIR_BIT[2] = {
-    (1ULL << 33) | (1ULL << 60) | (1ULL << 61) | (1ULL << 62), 0,
+    (1ULL << 33) | (1ULL << 37) | (1ULL << 42) | (1ULL << 43) | (1ULL << 45) |
+    (1ULL << 47) | (1ULL << 60) | (1ULL << 61) | (1ULL << 62), 0,
 };
 
 static const TokenType CHAR_TOK[128] = {
     ['+'] = TOK_PLUS, ['-'] = TOK_MINUS, ['*'] = TOK_STAR, ['/'] = TOK_SLASH,
-    ['&'] = TOK_AMP,
+    ['&'] = TOK_AMP, ['%'] = TOK_PERCENT,
     ['['] = TOK_LBRACKET, [']'] = TOK_RBRACKET,
     [';'] = TOK_SEMICOLON, [','] = TOK_COMMA,
     ['('] = TOK_LPAREN, [')'] = TOK_RPAREN, ['{'] = TOK_LBRACE, ['}'] = TOK_RBRACE,
-    ['='] = TOK_ASSIGN, ['!'] = TOK_ERROR, ['<'] = TOK_LT, ['>'] = TOK_GT,
+    ['='] = TOK_ASSIGN, ['!'] = TOK_NOT, ['<'] = TOK_LT, ['>'] = TOK_GT,
+    ['|'] = TOK_ERROR,
 };
 
 static const TokenType PAIR2_TOK[128] = {
     ['='] = TOK_EQ, ['!'] = TOK_NE, ['<'] = TOK_LE, ['>'] = TOK_GE,
+    ['+'] = TOK_PLUS_EQ, ['-'] = TOK_MINUS_EQ, ['*'] = TOK_STAR_EQ,
+    ['/'] = TOK_SLASH_EQ, ['%'] = TOK_PERCENT_EQ,
 };
 
 static Token next_token(Lexer *lx) {
-    while (isspace(lx->src[lx->pos])) {
-        if (lx->src[lx->pos] == '\n') lx->line++;
-        lx->pos++;
+    for (;;) {
+        while (isspace(lx->src[lx->pos])) {
+            if (lx->src[lx->pos] == '\n') lx->line++;
+            lx->pos++;
+        }
+        if (lx->src[lx->pos] == '/' && lx->src[lx->pos + 1] == '/') {
+            lx->pos += 2;
+            while (lx->src[lx->pos] && lx->src[lx->pos] != '\n') lx->pos++;
+            continue;
+        }
+        break;
     }
     int s = lx->pos, line = lx->line;
     char c = lx->src[s];
@@ -108,14 +124,53 @@ static Token next_token(Lexer *lx) {
     if (isalpha(c) || c == '_') {
         while (isalnum(lx->src[lx->pos]) || lx->src[lx->pos] == '_') lx->pos++;
         int len = lx->pos - s;
-        for (int i = 0; i < 9; i++)
+        for (int i = 0; i < 11; i++)
             if (len == (int)strlen(KWD[i]) && !memcmp(&lx->src[s], KWD[i], len))
                 return tok(TOK_LET + i, &lx->src[s], len, line);
         return tok(TOK_IDENTIFIER, &lx->src[s], len, line);
     }
     if (isdigit(c)) {
-        while (isdigit(lx->src[lx->pos])) lx->pos++;
+        if (c == '0' && (lx->src[s + 1] == 'x' || lx->src[s + 1] == 'X')) {
+            lx->pos = s + 2;
+            while (isxdigit(lx->src[lx->pos])) lx->pos++;
+        } else
+            while (isdigit(lx->src[lx->pos])) lx->pos++;
         return tok(TOK_NUMBER, &lx->src[s], lx->pos - s, line);
+    }
+    if (c == '"') {
+        lx->pos++;
+        while (lx->src[lx->pos] && lx->src[lx->pos] != '"')
+            lx->pos += lx->src[lx->pos] == '\\' && lx->src[lx->pos + 1] ? 2 : 1;
+        if (lx->src[lx->pos] != '"') return tok(TOK_ERROR, &lx->src[s], 1, line);
+        lx->pos++;
+        return tok(TOK_STR, &lx->src[s], lx->pos - s, line);
+    }
+    if (c == '\'') {
+        lx->pos = s + 1;
+        int ch = (unsigned char)lx->src[lx->pos];
+        if (ch == '\\') {
+            lx->pos++;
+            ch = lx->src[lx->pos];
+            ch = ch == 'n' ? '\n' : ch == 't' ? '\t' : ch == '0' ? 0 : ch;
+        }
+        if (!lx->src[lx->pos] || lx->src[lx->pos + 1] != '\'')
+            return tok(TOK_ERROR, &lx->src[s], 1, line);
+        lx->pos += 2;
+        char buf[16], rev[16];
+        int n = 0;
+        unsigned u = (unsigned)ch;
+        do { buf[n++] = (char)('0' + u % 10); u /= 10; } while (u);
+        for (int i = 0; i < n; i++) rev[i] = buf[n - 1 - i];
+        Token tk = { TOK_NUMBER, strndup(rev, (size_t)n), line };
+        return tk;
+    }
+    if (c == '&' && lx->src[s + 1] == '&') {
+        lx->pos = s + 2;
+        return tok(TOK_ANDAND, &lx->src[s], 2, line);
+    }
+    if (c == '|' && lx->src[s + 1] == '|') {
+        lx->pos = s + 2;
+        return tok(TOK_OROR, &lx->src[s], 2, line);
     }
     lx->pos++;
     unsigned char uc = (unsigned char)c;
@@ -134,24 +189,27 @@ static Token next_token(Lexer *lx) {
 typedef enum {
     NODE_NUMBER, NODE_VARIABLE, NODE_BINARY, NODE_LET, NODE_PRINT,
     NODE_BLOCK, NODE_IF, NODE_WHILE, NODE_RETURN, NODE_FUNCTION, NODE_CALL,
-    NODE_ADDR, NODE_DEREF, NODE_INDEX, NODE_ASSIGN, NODE_SIZEOF
+    NODE_ADDR, NODE_DEREF, NODE_INDEX, NODE_ASSIGN, NODE_SIZEOF, NODE_STR, NODE_NOT
 } NodeType;
-typedef enum { OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_EQ, OP_NE, OP_LT, OP_GT, OP_LE, OP_GE } BinOp;
+typedef enum { OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_EQ, OP_NE, OP_LT, OP_GT, OP_LE, OP_GE, OP_MOD, OP_AND, OP_OR } BinOp;
 
-typedef struct Type { uint8_t kind, len; struct Type *base; } Type;
+typedef struct Type { uint8_t kind; int len; uint8_t sz; struct Type *base; } Type;
 
-static Type TY_INT = { 0, 0, NULL };
+static Type TY_INT = { 0, 0, 8, NULL }, TY_CHAR = { 0, 0, 1, NULL };
 static Type *ty_ptr(Type *b) {
-    static Type t[16]; static int n;
-    t[n] = (Type){ 1, 0, b };
+    static Type t[512]; static int n;
+    if (n >= (int)(sizeof t / sizeof *t)) die("too many types", 0);
+    t[n] = (Type){ 1, 0, 8, b };
     return &t[n++];
 }
 static Type *ty_arr(int n, Type *b) {
-    static Type t[16]; static int c;
-    t[c] = (Type){ 2, (uint8_t)n, b };
+    static Type t[512]; static int c;
+    if (c >= (int)(sizeof t / sizeof *t)) die("too many types", 0);
+    t[c] = (Type){ 2, n, 8, b };
     return &t[c++];
 }
-static int ty_size(Type *t) { return t->kind == 2 ? t->len * ty_size(t->base) : 8; }
+static int ty_size(Type *t) { return t->kind == 2 ? t->len * ty_size(t->base) : t->sz; }
+static int is_char(Type *t) { return t->kind == 0 && t->sz == 1; }
 
 typedef struct ASTNode {
     NodeType type;
@@ -166,11 +224,12 @@ typedef struct ASTNode {
         struct { struct ASTNode *cond, *then, *else_; } if_node;
         struct { struct ASTNode *cond, *body; } while_node;
         struct { struct ASTNode *value; } return_node;
-        struct { char *name; char **params; int pcount; struct ASTNode *body; } function;
+        struct { char *name; char **params; Type **ptypes; int pcount; struct ASTNode *body; } function;
         struct { char *name; struct ASTNode **args; int acount; } call;
         struct { struct ASTNode *value; } unary;
         struct { struct ASTNode *base, *index; } index;
-        struct { struct ASTNode *lhs, *rhs; } assign;
+        struct { struct ASTNode *lhs, *rhs; int cop; } assign;
+        struct { int off, len; } str;
     } data;
 } ASTNode;
 
@@ -178,6 +237,43 @@ static ASTNode *node(NodeType t, int line) {
     ASTNode *n = calloc(1, sizeof *n);
     n->type = t; n->line = line;
     return n;
+}
+
+static ASTNode *mkbin(BinOp op, ASTNode *l, ASTNode *r, int line) {
+    if (l->type == NODE_NUMBER && r->type == NODE_NUMBER) {
+        long a = l->data.number.value, b = r->data.number.value, v = 0;
+        switch (op) {
+            case OP_ADD: v = a + b; break;
+            case OP_SUB: v = a - b; break;
+            case OP_MUL: v = a * b; break;
+            case OP_DIV: if (!b) die("division by zero", line); v = a / b; break;
+            case OP_MOD: if (!b) die("modulo by zero", line); v = a % b; break;
+            case OP_EQ:  v = a == b; break;
+            case OP_NE:  v = a != b; break;
+            case OP_LT:  v = a < b; break;
+            case OP_GT:  v = a > b; break;
+            case OP_LE:  v = a <= b; break;
+            case OP_GE:  v = a >= b; break;
+            case OP_AND: v = a && b; break;
+            case OP_OR:  v = a || b; break;
+        }
+        ASTNode *n = node(NODE_NUMBER, line);
+        n->data.number.value = v;
+        return n;
+    }
+    ASTNode *n = node(NODE_BINARY, line);
+    n->data.binary.op = op;
+    n->data.binary.left = l;
+    n->data.binary.right = r;
+    return n;
+}
+
+static struct { char *name; long value; } CONSTS[256];
+static int nconst;
+static int const_find(const char *name) {
+    for (int i = 0; i < nconst; i++)
+        if (!strcmp(CONSTS[i].name, name)) return i;
+    return -1;
 }
 
 typedef struct { Token *tokens; int count, pos; Token cur; } Parser;
@@ -190,26 +286,33 @@ static void expect(Parser *p, TokenType t, const char *what) {
 }
 
 static const uint8_t BINOP[TOK_ERROR + 1] = {
-    [TOK_EQ] = OP_EQ | 1 << 4,  [TOK_NE] = OP_NE | 1 << 4,
-    [TOK_LT] = OP_LT | 2 << 4,  [TOK_GT] = OP_GT | 2 << 4,
-    [TOK_LE] = OP_LE | 2 << 4,  [TOK_GE] = OP_GE | 2 << 4,
-    [TOK_PLUS] = OP_ADD | 3 << 4, [TOK_MINUS] = OP_SUB | 3 << 4,
-    [TOK_STAR] = OP_MUL | 4 << 4, [TOK_SLASH] = OP_DIV | 4 << 4,
+    [TOK_EQ] = OP_EQ | 3 << 4,  [TOK_NE] = OP_NE | 3 << 4,
+    [TOK_LT] = OP_LT | 3 << 4,  [TOK_GT] = OP_GT | 3 << 4,
+    [TOK_LE] = OP_LE | 3 << 4,  [TOK_GE] = OP_GE | 3 << 4,
+    [TOK_PLUS] = OP_ADD | 4 << 4, [TOK_MINUS] = OP_SUB | 4 << 4,
+    [TOK_STAR] = OP_MUL | 5 << 4, [TOK_SLASH] = OP_DIV | 5 << 4,
+    [TOK_PERCENT] = OP_MOD | 5 << 4,
+    [TOK_ANDAND] = OP_AND | 2 << 4,
+    [TOK_OROR] = OP_OR | 1 << 4,
 };
+
+static uint8_t LIT[16384];
+static int nlit;
 
 static ASTNode *parse_expression(Parser*);
 static ASTNode *parse_statement(Parser*);
 static ASTNode *parse_block(Parser*);
 
 static Type *parse_type(Parser *p) {
-    expect(p, TOK_INT, "expected type");
-    Type *t = &TY_INT;
+    if (p->cur.type != TOK_INT && p->cur.type != TOK_CHAR) die("expected type", p->cur.line);
+    Type *t = p->cur.type == TOK_CHAR ? &TY_CHAR : &TY_INT;
+    adv(p);
     for (;;) {
         if (p->cur.type == TOK_STAR) { adv(p); t = ty_ptr(t); }
         else if (p->cur.type == TOK_LBRACKET) {
             adv(p);
             if (p->cur.type != TOK_NUMBER) die("expected array size", p->cur.line);
-            int n = (int)atol(p->cur.text);
+            int n = (int)strtoll(p->cur.text, 0, 0);
             adv(p);
             expect(p, TOK_RBRACKET, "expected ']'");
             t = ty_arr(n, t);
@@ -223,10 +326,17 @@ static ASTNode *parse_primary(Parser *p) {
     if (t.type == TOK_NUMBER) {
         adv(p);
         ASTNode *n = node(NODE_NUMBER, t.line);
-        n->data.number.value = atol(t.text);
+        n->data.number.value = strtoll(t.text, 0, 0);
         return n;
     }
     if (t.type == TOK_IDENTIFIER) {
+        for (int i = 0; i < nconst; i++)
+            if (!strcmp(CONSTS[i].name, t.text)) {
+                adv(p);
+                ASTNode *n = node(NODE_NUMBER, t.line);
+                n->data.number.value = CONSTS[i].value;
+                return n;
+            }
         adv(p);
         if (p->cur.type != TOK_LPAREN) {
             ASTNode *n = node(NODE_VARIABLE, t.line);
@@ -245,6 +355,24 @@ static ASTNode *parse_primary(Parser *p) {
         expect(p, TOK_RPAREN, "expected ')'");
         n->data.call.args = args;
         n->data.call.acount = ac;
+        return n;
+    }
+    if (t.type == TOK_STR) {
+        adv(p);
+        ASTNode *n = node(NODE_STR, t.line);
+        n->data.str.off = nlit;
+        for (int i = 1; t.text[i] != '"'; i++) {
+            char ch = t.text[i];
+            if (ch == '\\') {
+                ch = t.text[++i];
+                ch = ch == 'n' ? '\n' : ch == 't' ? '\t' : ch;
+            }
+            if (nlit >= (int)sizeof LIT) die("string pool overflow", t.line);
+            LIT[nlit++] = ch;
+        }
+        if (nlit >= (int)sizeof LIT) die("string pool overflow", t.line);
+        LIT[nlit++] = 0;
+        n->data.str.len = nlit - n->data.str.off - 1;
         return n;
     }
     if (t.type == TOK_LPAREN) {
@@ -277,11 +405,7 @@ static ASTNode *parse_unary(Parser *p) {
         case TOK_MINUS: {
             adv(p);
             ASTNode *zero = node(NODE_NUMBER, line);
-            ASTNode *n = node(NODE_BINARY, line);
-            n->data.binary.op = OP_SUB;
-            n->data.binary.left = zero;
-            n->data.binary.right = parse_unary(p);
-            return n;
+            return mkbin(OP_SUB, zero, parse_unary(p), line);
         }
         case TOK_AMP:
             adv(p);
@@ -289,6 +413,9 @@ static ASTNode *parse_unary(Parser *p) {
         case TOK_STAR:
             adv(p);
             { ASTNode *n = node(NODE_DEREF, line); n->data.unary.value = parse_unary(p); return n; }
+        case TOK_NOT:
+            adv(p);
+            { ASTNode *n = node(NODE_NOT, line); n->data.unary.value = parse_unary(p); return n; }
         case TOK_SIZEOF:
             adv(p);
             { ASTNode *n = node(NODE_SIZEOF, line); n->data.unary.value = parse_unary(p); return n; }
@@ -304,25 +431,29 @@ static ASTNode *parse_bin(Parser *p, int min_prec) {
         if ((e >> 4) < min_prec) return l;
         Token t = p->cur;
         adv(p);
-        ASTNode *n = node(NODE_BINARY, t.line);
-        n->data.binary.op = (BinOp)(e & 15);
-        n->data.binary.left = l;
-        n->data.binary.right = parse_bin(p, (e >> 4) + 1);
-        l = n;
+        l = mkbin((BinOp)(e & 15), l, parse_bin(p, (e >> 4) + 1), t.line);
     }
 }
 
 static ASTNode *parse_expression(Parser *p) {
     ASTNode *l = parse_bin(p, 1);
-    if (p->cur.type == TOK_ASSIGN) {
-        int line = p->cur.line;
-        adv(p);
-        ASTNode *n = node(NODE_ASSIGN, line);
-        n->data.assign.lhs = l;
-        n->data.assign.rhs = parse_expression(p);
-        return n;
+    int cop = 0;
+    switch (p->cur.type) {
+        case TOK_ASSIGN:     cop = 0; break;
+        case TOK_PLUS_EQ:    cop = OP_ADD + 1; break;
+        case TOK_MINUS_EQ:   cop = OP_SUB + 1; break;
+        case TOK_STAR_EQ:    cop = OP_MUL + 1; break;
+        case TOK_SLASH_EQ:   cop = OP_DIV + 1; break;
+        case TOK_PERCENT_EQ: cop = OP_MOD + 1; break;
+        default: return l;
     }
-    return l;
+    int line = p->cur.line;
+    adv(p);
+    ASTNode *n = node(NODE_ASSIGN, line);
+    n->data.assign.lhs = l;
+    n->data.assign.cop = cop;
+    n->data.assign.rhs = parse_expression(p);
+    return n;
 }
 
 static ASTNode *parse_block(Parser *p) {
@@ -337,10 +468,28 @@ static ASTNode *parse_block(Parser *p) {
 static ASTNode *parse_statement(Parser *p) {
     Token t = p->cur;
     switch (t.type) {
+        case TOK_CONST: {
+            adv(p);
+            if (p->cur.type != TOK_IDENTIFIER) die("expected const name", p->cur.line);
+            if (nconst >= (int)(sizeof CONSTS / sizeof *CONSTS)) die("too many consts", p->cur.line);
+            CONSTS[nconst].name = strdup(p->cur.text);
+            adv(p);
+            expect(p, TOK_ASSIGN, "expected '=' in const");
+            long v = 0;
+            int neg = p->cur.type == TOK_MINUS;
+            if (neg) adv(p);
+            if (p->cur.type != TOK_NUMBER) die("const must be a number", p->cur.line);
+            v = strtoll(p->cur.text, 0, 0);
+            adv(p);
+            CONSTS[nconst].value = neg ? -v : v;
+            nconst++;
+            expect(p, TOK_SEMICOLON, "expected ';'");
+            return node(NODE_BLOCK, t.line);
+        }
         case TOK_LET: {
             adv(p);
             Type *ty = &TY_INT;
-            if (p->cur.type == TOK_INT) ty = parse_type(p);
+            if (p->cur.type == TOK_INT || p->cur.type == TOK_CHAR) ty = parse_type(p);
             if (p->cur.type != TOK_IDENTIFIER) die("expected var name", p->cur.line);
             ASTNode *n = node(NODE_LET, t.line);
             n->data.let.name = strdup(p->cur.text);
@@ -349,7 +498,7 @@ static ASTNode *parse_statement(Parser *p) {
             while (p->cur.type == TOK_LBRACKET) {
                 adv(p);
                 if (p->cur.type != TOK_NUMBER) die("expected array size", p->cur.line);
-                int sz = (int)atol(p->cur.text);
+                int sz = (int)strtoll(p->cur.text, 0, 0);
                 adv(p);
                 expect(p, TOK_RBRACKET, "expected ']'");
                 n->data.let.ty = ty_arr(sz, n->data.let.ty);
@@ -435,11 +584,11 @@ static ASTNode *parse_program(Parser *p) {
     return root;
 }
 
-static uint8_t code[8192];
+static uint8_t code[262144];
 static int clen, entry, is_pe;
-static int lab_pos[256], nlab = 1;
-static struct { int pos, lab; } PATCH[2048];
-static int npatch;
+static int lab_pos[1024], nlab = 1;
+static struct { int pos, lab, g; } PATCH[8192];   
+static int npatch, litlab, pcb;
 
 #define EMIT(...) do {                                   \
     uint8_t _bs[] = { __VA_ARGS__ };                     \
@@ -455,23 +604,33 @@ static void emit_imm(long long v, int n) {
     clen += n;
 }
 
-static void mov_rax_imm(long long v) {
-    if (v >= -128 && v <= 127) EMIT(0x6A, (uint8_t)v, 0x58);
-    else if (v >= 0 && v <= 0xFFFFFFFFLL) { EMIT(0xB8); emit_imm(v, 4); }
-    else { EMIT(0x48, 0xB8); emit_imm(v, 8); } 
+static void rbp_disp(int reg, int off) {
+    if (off >= -128 && off <= 127) EMIT(0x40 | (reg << 3) | 5, (uint8_t)off);
+    else { EMIT(0x80 | (reg << 3) | 5); emit_imm(off, 4); }
 }
 
-static int new_label(void) { return nlab++; }
+static void mov_rax_imm(long long v) {
+    if (!v) { EMIT(0x48, 0x31, 0xC0); return; }
+    if (v >= -128 && v <= 127) EMIT(0x6A, (uint8_t)v, 0x58);
+    else if (v >= 0 && v <= 0xFFFFFFFFLL) { EMIT(0xB8); emit_imm(v, 4); }
+    else if (v >= -2147483648LL && v <= -1) { EMIT(0x48, 0xC7, 0xC0); emit_imm(v, 4); }  /* mov rax,imm32 */
+    else { EMIT(0x48, 0xB8); emit_imm(v, 8); }
+}
+
+static int new_label(void) {
+    if (nlab >= (int)(sizeof lab_pos / sizeof *lab_pos)) die("too many labels", 0);
+    return nlab++;
+}
 static void put_label(int lab) { lab_pos[lab] = clen; }
 
-static void emit_rel32(int lab) { 
+static void emit_patch(int g, int lab) {
     if (clen + 4 > (int)sizeof code || npatch >= (int)(sizeof PATCH / sizeof *PATCH))
         die("too many jumps", 0);
-    PATCH[npatch].pos = clen;
-    PATCH[npatch].lab = lab;
+    PATCH[npatch] = (typeof(PATCH[0])){ clen, lab, g };
     npatch++;
     clen += 4;
 }
+static void emit_rel32(int lab) { emit_patch(0, lab); }
 static void emit_jmp(int lab)  { EMIT(0xE9); emit_rel32(lab); }
 static void emit_jcc(int cc, int lab) { EMIT(0x0F, cc); emit_rel32(lab); } 
 static void emit_call(int lab) { EMIT(0xE8); emit_rel32(lab); }
@@ -479,22 +638,52 @@ static void emit_call(int lab) { EMIT(0xE8); emit_rel32(lab); }
 #define PE_SECT (0x40 + 4 + 20 + 240 + 40)   
 
 static int IAT_PATCH[16], niat;
-static void emit_call_iat(int slot) {       
+static void emit_call_iat(int slot) {
+    if (niat >= (int)(sizeof IAT_PATCH / sizeof *IAT_PATCH)) die("too many IAT calls", 0);
     EMIT(0xFF, 0x15);
     IAT_PATCH[niat++] = clen * 4 | slot;
     emit_imm(0, 4);
 }
 
+typedef struct { char *name; Type *ty; int off; int reg; } Glob;
+static Glob GLOB[256];
+static int nglob, gsize;
+static Glob *glob_find(const char *name) {
+    for (int i = 0; i < nglob; i++)
+        if (!strcmp(GLOB[i].name, name)) return &GLOB[i];
+    return NULL;
+}
+
+static void greg_load_rax(int r) { EMIT((uint8_t)(0x48 | (r >= 8)), 0x8B, (uint8_t)(0xC0 | (r & 7))); }          /* mov rax,rN */
+static void greg_store_rax(int r) { EMIT((uint8_t)(0x48 | (r >= 8)), 0x89, (uint8_t)(0xC0 | (r & 7))); }         /* mov rN,rax */
+static void greg_load_rcx(int r) { EMIT((uint8_t)(0x48 | ((r >= 8) << 2)), 0x89, (uint8_t)(0xC0 | ((r & 7) << 3) | 1)); } /* mov rcx,rN */
+static void greg_zero(int r) { EMIT((uint8_t)(0x40 | ((r >= 8) << 2) | (r >= 8)), 0x31, (uint8_t)(0xC0 | ((r & 7) << 3) | (r & 7))); } /* xor rNd,rNd */
+
 static void apply_patches(void) {
-    for (int i = 0; i < npatch; i++)
-        *(int32_t *)(code + PATCH[i].pos) = lab_pos[PATCH[i].lab] - (PATCH[i].pos + 4);
+    for (int i = 0; i < npatch; i++) {
+        int p = PATCH[i].pos, t = 0;
+        int64_t rel;
+        if (PATCH[i].g == 0) t = lab_pos[PATCH[i].lab];
+        else if (PATCH[i].g == 1) t = lab_pos[litlab] + PATCH[i].lab;
+        if (PATCH[i].g < 2) rel = t - (p + 4);
+        else if (is_pe)
+            rel = (int64_t)pcb + ((clen + 15) & ~15) + 176 + PATCH[i].lab - (pcb + p + 4);
+        else {
+            int64_t hdr = 64 + 56;
+            int64_t dva = 0x400000 + hdr + clen;
+            rel = dva + PATCH[i].lab - (0x400000 + hdr + p + 4);
+        }
+        *(int32_t *)(code + p) = (int32_t)rel;
+    }
 }
 
 typedef struct { char *name; Type *ty; int off; } Loc;
-static Loc LOCS[64];
-static int nloc, cur_off;
+static Loc LOCS[256];
+static int nloc, cur_off, frame_min;
 static Loc *loc_add(const char *name, Type *ty) {
+    if (nloc >= (int)(sizeof LOCS / sizeof *LOCS)) die("too many locals", 0);
     cur_off -= ty_size(ty);
+    if (cur_off < frame_min) frame_min = cur_off;
     LOCS[nloc] = (Loc){ strdup(name), ty, cur_off };
     return &LOCS[nloc++];
 }
@@ -504,7 +693,7 @@ static Loc *loc_find(const char *name) {
     return NULL;
 }
 
-static struct { char *name; int lab, params; } FNS[64];
+static struct { char *name; int lab, params; } FNS[256];
 static int nfn;
 static int fn_find(const char *name) {
     for (int i = 0; i < nfn; i++)
@@ -516,33 +705,55 @@ static int setcc_of(BinOp op) {
     return op < OP_LT ? 0x90 | op : 0x9C | (-(op - OP_LT) & 3);
 }
 
-static const uint8_t PRINT_INT_CODE[] = {
-    0x55,                    
-    0x48,0x89,0xE5,            
-    0x48,0x83,0xEC,0x20,       
-    0x48,0x89,0xF8,            
-    0x6A,0x0A,0x59,            
-    0x48,0x8D,0x75,0xFF,       
-    0x48,0x31,0xD2,            
-    0x48,0xF7,0xF1,            
-    0x80,0xC2,0x30,             
-    0x48,0xFF,0xCE,            
-    0x88,0x16,                  
-    0x48,0x85,0xC0,            
-    0x75,0xED,                  
-    0x48,0x8D,0x55,0xFF,       
-    0x48,0x29,0xF2,             
-    0x6A,0x01,0x58,             
-    0x89,0xC7,                  
-    0x0F,0x05,                 
-    0xC9,0xC3,                 
-};
+static void emit_binop(BinOp op) {
+    switch (op) {
+        case OP_ADD: EMIT(0x48, 0x01, 0xC8); break;
+        case OP_SUB: EMIT(0x48, 0x29, 0xC8); break;
+        case OP_MUL: EMIT(0x48, 0x0F, 0xAF, 0xC1); break;
+        case OP_DIV: EMIT(0x48, 0x99, 0x48, 0xF7, 0xF9); break;
+        case OP_MOD: EMIT(0x48, 0x99, 0x48, 0xF7, 0xF9, 0x48, 0x89, 0xD0); break;
+        default:
+            EMIT(0x48, 0x39, 0xC8);
+            EMIT(0x0F, setcc_of(op), 0xC0);
+            EMIT(0x0F, 0xB6, 0xC0);
+            break;
+    }
+}
+
+static int try_leaf_rcx(ASTNode *n) {
+    if (n->type != NODE_VARIABLE) return 0;
+    Loc *l = loc_find(n->data.variable.name);
+    if (l) {
+        if (l->ty->kind != 0) return 0;
+        if (is_char(l->ty)) { EMIT(0x0F, 0xB6); rbp_disp(1, l->off); }
+        else { EMIT(0x48, 0x8B); rbp_disp(1, l->off); }
+        return 1;
+    }
+    Glob *g = glob_find(n->data.variable.name);
+    if (!g || g->ty->kind != 0) return 0;
+    if (g->reg) { greg_load_rcx(g->reg); return 1; }
+    if (is_char(g->ty)) { EMIT(0x0F, 0xB6, 0x0D); emit_patch(2, g->off); }
+    else { EMIT(0x48, 0x8B, 0x0D); emit_patch(2, g->off); }
+    return 1;
+}
+
+static void emit_cmp_rax_imm(long long v) {
+    if (v >= -128 && v <= 127) EMIT(0x48, 0x83, 0xF8, (uint8_t)v);
+    else if (v >= -2147483648LL && v <= 2147483647LL) { EMIT(0x48, 0x3D); emit_imm(v, 4); }
+    else { EMIT(0x48, 0xB9); emit_imm(v, 8); EMIT(0x48, 0x39, 0xC8); }
+}
 
 static void emit_print_pe(void) {
     EMIT(0x55);
     EMIT(0x48,0x89,0xE5);
     EMIT(0x48,0x83,0xEC,0x50);
-    EMIT(0x48,0x89,0xF8);
+    EMIT(0x45,0x31,0xDB);
+    EMIT(0x48,0x85,0xC0);
+    int pos = new_label();
+    emit_jcc(0x89, pos);
+    EMIT(0x48,0xF7,0xD8);
+    EMIT(0x41,0xBB,1,0,0,0);
+    put_label(pos);
     EMIT(0x6A,0x0A,0x59);
     EMIT(0x48,0x8D,0x75,0xFF);
     int loop = new_label();
@@ -554,6 +765,12 @@ static void emit_print_pe(void) {
     EMIT(0x88,0x16);
     EMIT(0x48,0x85,0xC0);
     emit_jcc(0x85, loop);
+    EMIT(0x45,0x85,0xDB);
+    int wr = new_label();
+    emit_jcc(0x84, wr);
+    EMIT(0x48,0xFF,0xCE);
+    EMIT(0xC6,0x06,0x2D);
+    put_label(wr);
     EMIT(0x6A,0xF5,0x59);
     emit_call_iat(0);
     EMIT(0x48,0x89,0xC1);
@@ -566,6 +783,42 @@ static void emit_print_pe(void) {
     EMIT(0xC9,0xC3);
 }
 
+static void emit_print_elf(void) {
+    EMIT(0x55);
+    EMIT(0x48,0x89,0xE5);
+    EMIT(0x48,0x83,0xEC,0x20);
+    EMIT(0x45,0x31,0xDB);
+    EMIT(0x48,0x85,0xC0);
+    int pos = new_label();
+    emit_jcc(0x89, pos);
+    EMIT(0x48,0xF7,0xD8);
+    EMIT(0x41,0xBB,1,0,0,0);
+    put_label(pos);
+    EMIT(0x6A,0x0A,0x59);
+    EMIT(0x48,0x8D,0x75,0xFF);
+    int loop = new_label();
+    put_label(loop);
+    EMIT(0x48,0x31,0xD2);
+    EMIT(0x48,0xF7,0xF1);
+    EMIT(0x80,0xC2,0x30);
+    EMIT(0x48,0xFF,0xCE);
+    EMIT(0x88,0x16);
+    EMIT(0x48,0x85,0xC0);
+    emit_jcc(0x85, loop);
+    EMIT(0x45,0x85,0xDB);
+    int wr = new_label();
+    emit_jcc(0x84, wr);
+    EMIT(0x48,0xFF,0xCE);
+    EMIT(0xC6,0x06,0x2D);
+    put_label(wr);
+    EMIT(0x48,0x8D,0x55,0xFF);
+    EMIT(0x48,0x29,0xF2);
+    EMIT(0x6A,0x01,0x58);
+    EMIT(0x89,0xC7);
+    EMIT(0x0F,0x05);
+    EMIT(0xC9,0xC3);
+}
+
 static void gen_expr(ASTNode*);
 static void gen_stmt(ASTNode*);
 
@@ -574,29 +827,58 @@ static void mov_rax_imm(long long v);
 static int ty_size_of_expr(ASTNode *n) {
     if (n->type == NODE_VARIABLE) {
         Loc *l = loc_find(n->data.variable.name);
-        return l ? ty_size(l->ty) : 8;
+        if (l) return ty_size(l->ty);
+        Glob *g = glob_find(n->data.variable.name);
+        if (g) return ty_size(g->ty);
+        return 8;
     }
+    if (n->type == NODE_STR) return 8;
     return 8;
+}
+
+static Type *ty_of_expr(ASTNode *n) {
+    switch (n->type) {
+        case NODE_VARIABLE: {
+            Loc *l = loc_find(n->data.variable.name);
+            if (l) return l->ty;
+            Glob *g = glob_find(n->data.variable.name);
+            return g ? g->ty : &TY_INT;
+        }
+        case NODE_STR:    return ty_ptr(&TY_CHAR);
+        case NODE_DEREF:  return ty_of_expr(n->data.unary.value)->kind ? ty_of_expr(n->data.unary.value)->base : &TY_INT;
+        case NODE_INDEX:  return ty_of_expr(n->data.index.base)->kind ? ty_of_expr(n->data.index.base)->base : &TY_INT;
+        case NODE_ADDR:   return ty_ptr(ty_of_expr(n->data.unary.value));
+        default:          return &TY_INT;
+    }
 }
 
 static void gen_addr(ASTNode *n) {
     switch (n->type) {
         case NODE_VARIABLE: {
             Loc *l = loc_find(n->data.variable.name);
-            if (!l) die("undefined variable", n->line);
-            EMIT(0x48, 0x8D, 0x45, (uint8_t)l->off);
+            if (l) { EMIT(0x48, 0x8D); rbp_disp(0, l->off); break; }
+            Glob *g = glob_find(n->data.variable.name);
+            if (!g) die("undefined variable", n->line);
+            if (g->reg) die("cannot take address of a register-resident global", n->line);
+            EMIT(0x48, 0x8D, 0x05);
+            emit_patch(2, g->off);
             break;
         }
         case NODE_DEREF:
             gen_expr(n->data.unary.value);
             break;
-        case NODE_INDEX:
-            gen_addr(n->data.index.base);
+        case NODE_INDEX: {
+            Type *bt = ty_of_expr(n->data.index.base);
+            if (bt->kind == 1) gen_expr(n->data.index.base);
+            else gen_addr(n->data.index.base);
             EMIT(0x50);
             gen_expr(n->data.index.index);
-            EMIT(0x48, 0xC1, 0xE0, 0x03);   
-            EMIT(0x5B, 0x48, 0x01, 0xD8);   
+            int es = ty_size(ty_of_expr(n));
+            if (es == 8) EMIT(0x48, 0xC1, 0xE0, 0x03);
+            else if (es != 1) { EMIT(0x48, 0x69, 0xC0); emit_imm(es, 4); }
+            EMIT(0x5B, 0x48, 0x01, 0xD8);
             break;
+        }
         default:
             die("not addressable", n->line);
     }
@@ -605,71 +887,248 @@ static void gen_addr(ASTNode *n) {
 static void gen_expr(ASTNode *n) {
     switch (n->type) {
         case NODE_NUMBER:
-            EMIT(0x48, 0xB8); 
-            emit_imm(n->data.number.value, 8);
+            mov_rax_imm(n->data.number.value);
             break;
         case NODE_VARIABLE: {
             Loc *l = loc_find(n->data.variable.name);
-            if (!l) die("undefined variable", n->line);
-            if (l->ty->kind == 2) EMIT(0x48, 0x8D, 0x45, (uint8_t)l->off); 
-            else EMIT(0x48, 0x8B, 0x45, (uint8_t)l->off);                  
+            if (l) {
+                if (l->ty->kind == 2) { EMIT(0x48, 0x8D); rbp_disp(0, l->off); }
+                else if (is_char(l->ty)) { EMIT(0x0F, 0xB6); rbp_disp(0, l->off); }
+                else { EMIT(0x48, 0x8B); rbp_disp(0, l->off); }
+                break;
+            }
+            Glob *g = glob_find(n->data.variable.name);
+            if (!g) die("undefined variable", n->line);
+            if (g->reg) { greg_load_rax(g->reg); break; }  
+            if (g->ty->kind == 2) { EMIT(0x48, 0x8D, 0x05); emit_patch(2, g->off); }
+            else if (is_char(g->ty)) { EMIT(0x0F, 0xB6, 0x05); emit_patch(2, g->off); }
+            else { EMIT(0x48, 0x8B, 0x05); emit_patch(2, g->off); }
             break;
         }
+        case NODE_STR:
+            EMIT(0x48, 0x8D, 0x05);
+            emit_patch(1, n->data.str.off);
+            break;
         case NODE_ADDR:
             gen_addr(n->data.unary.value);
             break;
         case NODE_DEREF:
             gen_expr(n->data.unary.value);
-            EMIT(0x48, 0x8B, 0x00);  
+            if (is_char(ty_of_expr(n))) EMIT(0x0F, 0xB6, 0x00);
+            else EMIT(0x48, 0x8B, 0x00);
             break;
         case NODE_INDEX:
             gen_addr(n);
-            EMIT(0x48, 0x8B, 0x00);  
+            if (is_char(ty_of_expr(n))) EMIT(0x0F, 0xB6, 0x00);
+            else EMIT(0x48, 0x8B, 0x00);
             break;
-        case NODE_ASSIGN:
-            gen_addr(n->data.assign.lhs);
+        case NODE_ASSIGN: {
+            int cop = n->data.assign.cop ? n->data.assign.cop - 1 : -1;
+            ASTNode *lhs = n->data.assign.lhs;
+            Loc *l = NULL; Glob *g = NULL; Type *ty = NULL;
+            if (lhs->type == NODE_VARIABLE) {
+                l = loc_find(lhs->data.variable.name);
+                if (l) ty = l->ty;
+                else { g = glob_find(lhs->data.variable.name); if (g) ty = g->ty; }
+            }
+            if (g && g->reg) {
+                int r = g->reg;
+                gen_expr(n->data.assign.rhs);
+                if (cop < 0) { greg_store_rax(r); break; }          /* g = e */
+                int sync = 1;
+                switch (cop) {
+                    case OP_ADD: EMIT((uint8_t)(0x48 | (r >= 8)), 0x01, (uint8_t)(0xC0 | (r & 7))); break;   /* add  rN,rax */
+                    case OP_SUB: EMIT((uint8_t)(0x48 | (r >= 8)), 0x29, (uint8_t)(0xC0 | (r & 7))); break;   /* sub  rN,rax */
+                    case OP_MUL: EMIT(0x4C, 0x0F, 0xAF, (uint8_t)(0xC0 | ((r & 7) << 3))); break;           /* imul rN,rax */
+                    default: { 
+                        greg_load_rcx(r);
+                        greg_store_rax(r);
+                        EMIT(0x48, 0x89, 0xC8);                          /* mov rax,rcx */
+                        EMIT(0x48, 0x99);                                /* cqo */
+                        EMIT((uint8_t)(0x48 | (r >= 8)), 0xF7, (uint8_t)(0xC0 | 0x38 | (r & 7)));  /* idiv rN */
+                        if (cop == OP_MOD) EMIT(0x48, 0x89, 0xD0);       /* mov rax,rdx */
+                        greg_store_rax(r);
+                        sync = 0;
+                        break;
+                    }
+                }
+                if (sync) greg_load_rax(r);      
+                break;
+            }
+            if (ty && ty->kind == 0 && (cop < 0 || (!is_char(ty) && (cop == OP_ADD || cop == OP_SUB)))) {
+                gen_expr(n->data.assign.rhs);
+                if (cop < 0) {
+                    if (l) { EMIT(is_char(ty) ? 0x88 : 0x48, 0x89); rbp_disp(0, l->off); }
+                    else { EMIT(is_char(ty) ? 0x88 : 0x48, 0x89, 0x05); emit_patch(2, g->off); }
+                } else {
+                    int opc = cop == OP_ADD ? 0x01 : 0x29;
+                    if (l) { EMIT(0x48, opc); rbp_disp(0, l->off); }
+                    else { EMIT(0x48, opc, 0x05); emit_patch(2, g->off); }
+                }
+                break;
+            }
+            gen_addr(lhs);
             EMIT(0x50);
             gen_expr(n->data.assign.rhs);
-            EMIT(0x5B, 0x48, 0x89, 0x03);  
+            EMIT(0x5B);
+            if (cop >= 0) {
+                EMIT(0x48, 0x8B, 0x0B);
+                EMIT(0x48, 0x91);
+                switch (cop) {
+                    case OP_ADD: EMIT(0x48, 0x01, 0xC8); break;
+                    case OP_SUB: EMIT(0x48, 0x29, 0xC8); break;
+                    case OP_MUL: EMIT(0x48, 0x0F, 0xAF, 0xC1); break;
+                    case OP_DIV: EMIT(0x48, 0x99, 0x48, 0xF7, 0xF9); break;
+                    case OP_MOD: EMIT(0x48, 0x99, 0x48, 0xF7, 0xF9, 0x48, 0x89, 0xD0); break;
+                }
+            }
+            if (is_char(ty_of_expr(lhs))) EMIT(0x88, 0x03);
+            else EMIT(0x48, 0x89, 0x03);
             break;
+        }
         case NODE_SIZEOF:
             mov_rax_imm(ty_size_of_expr(n->data.unary.value));
             break;
+        case NODE_NOT:
+            gen_expr(n->data.unary.value);
+            EMIT(0x48, 0x85, 0xC0);             /* test rax,rax */
+            EMIT(0x0F, 0x94, 0xC0);             /* sete al */
+            EMIT(0x0F, 0xB6, 0xC0);             /* movzx rax,al */
+            break;
         case NODE_BINARY: {
             BinOp op = n->data.binary.op;
-            if (op >= OP_EQ) { 
-                gen_expr(n->data.binary.right); EMIT(0x50);       
-                gen_expr(n->data.binary.left);  EMIT(0x5B);   
-                EMIT(0x48, 0x39, 0xD8);                       
-                EMIT(0x0F, setcc_of(op), 0xC0);                 
-                EMIT(0x48, 0x0F, 0xB6, 0xC0);                     
+            ASTNode *r = n->data.binary.right;
+            if (op == OP_AND || op == OP_OR) {
+                int lab_sc = new_label(), lab_end = new_label();
+                int cc = op == OP_AND ? 0x84 : 0x85;   
+                int v_norm = op == OP_AND ? 1 : 0;    
+                gen_expr(n->data.binary.left);
+                EMIT(0x48, 0x85, 0xC0);
+                emit_jcc(cc, lab_sc);
+                gen_expr(r);
+                EMIT(0x48, 0x85, 0xC0);
+                emit_jcc(cc, lab_sc);
+                mov_rax_imm(v_norm);
+                emit_jmp(lab_end);
+                put_label(lab_sc);
+                mov_rax_imm(1 - v_norm);
+                put_label(lab_end);
                 break;
             }
-            gen_expr(n->data.binary.left);  EMIT(0x50);
-            gen_expr(n->data.binary.right); EMIT(0x5B);
-            switch (op) {
-                case OP_ADD: EMIT(0x48, 0x01, 0xD8); break;                            
-                case OP_SUB: EMIT(0x48, 0x93, 0x48, 0x29, 0xD8); break;                 
-                case OP_MUL: EMIT(0x48, 0x0F, 0xAF, 0xC3); break;                        
-                case OP_DIV: EMIT(0x48, 0x93, 0x48, 0x31, 0xD2, 0x48, 0xF7, 0xF3); break; 
-                default: break;
+            if (r->type == NODE_NUMBER) {
+                long long v = r->data.number.value;
+                gen_expr(n->data.binary.left);
+                switch (op) {
+                    case OP_ADD:
+                        if (v) {
+                            if (v >= -128 && v <= 127) EMIT(0x48, 0x83, 0xC0, (uint8_t)v);
+                            else if (v >= -2147483648LL && v <= 2147483647LL) { EMIT(0x48, 0x05); emit_imm(v, 4); }
+                            else { EMIT(0x48, 0xB9); emit_imm(v, 8); EMIT(0x48, 0x01, 0xC8); }
+                        }
+                        break;
+                    case OP_SUB:
+                        if (v) {
+                            if (v >= -128 && v <= 127) EMIT(0x48, 0x83, 0xE8, (uint8_t)v);
+                            else if (v >= -2147483648LL && v <= 2147483647LL) { EMIT(0x48, 0x2D); emit_imm(v, 4); }
+                            else { EMIT(0x48, 0xB9); emit_imm(v, 8); EMIT(0x48, 0x29, 0xC8); }
+                        }
+                        break;
+                    case OP_MUL:
+                        if (v == 1) break;
+                        if (!v) { EMIT(0x48, 0x31, 0xC0); break; }
+                        if (v >= -128 && v <= 127) EMIT(0x48, 0x6B, 0xC0, (uint8_t)v);
+                        else if (v >= -2147483648LL && v <= 2147483647LL) { EMIT(0x48, 0x69, 0xC0); emit_imm(v, 4); }
+                        else { EMIT(0x48, 0xB9); emit_imm(v, 8); EMIT(0x48, 0x0F, 0xAF, 0xC1); }
+                        break;
+                    case OP_DIV:
+                    case OP_MOD:
+                        EMIT(0x48, 0x99);
+                        if (v >= -128 && v <= 127) EMIT(0x6A, (uint8_t)v, 0x59);
+                        else if (v >= -2147483648LL && v <= 2147483647LL) { EMIT(0x48, 0xC7, 0xC1); emit_imm(v, 4); }
+                        else { EMIT(0x48, 0xB9); emit_imm(v, 8); }
+                        EMIT(0x48, 0xF7, 0xF9);
+                        if (op == OP_MOD) EMIT(0x48, 0x89, 0xD0);
+                        break;
+                    default:
+                        emit_cmp_rax_imm(v);
+                        EMIT(0x0F, setcc_of(op), 0xC0);
+                        EMIT(0x0F, 0xB6, 0xC0);
+                        break;
+                }
+                break;
             }
+            gen_expr(n->data.binary.left);
+            if (try_leaf_rcx(r)) { emit_binop(op); break; }
+            EMIT(0x50);
+            gen_expr(r);
+            EMIT(0x59);
+            EMIT(0x48, 0x91);
+            emit_binop(op);
             break;
         }
         case NODE_CALL: {
-            if (n->data.call.acount > 1) die("at most 1 argument", n->line);
-            int f = fn_find(n->data.call.name);
-            if (f < 0) { fprintf(stderr, "error: unknown func %s\n", n->data.call.name); exit(1); }
-            for (int i = 0; i < n->data.call.acount; i++) {
-                gen_expr(n->data.call.args[i]);
-                EMIT(0x48, 0x89, 0xC7); 
+            if (!strcmp(n->data.call.name, "syscall")) {
+                if (n->data.call.acount < 1 || n->data.call.args[0]->type != NODE_NUMBER)
+                    die("syscall(nr, a, b, c)", n->line);
+                long nr = n->data.call.args[0]->data.number.value;
+                if (is_pe) {
+                    if (nr != 60) die("syscall: only exit(60) on PE", n->line);
+                    gen_expr(n->data.call.args[1]);
+                    EMIT(0x48, 0x89, 0xC1);
+                    emit_call_iat(2);
+                    break;
+                }
+                if (n->data.call.acount != 4) die("syscall(nr, a, b, c)", n->line);
+                for (int i = 3; i >= 1; i--) { gen_expr(n->data.call.args[i]); EMIT(0x50); }
+                EMIT(0x5F, 0x5E, 0x5A);
+                mov_rax_imm(nr);
+                EMIT(0x0F, 0x05);
+                break;
             }
-            emit_call(FNS[f].lab);
+            int f = fn_find(n->data.call.name);
+            if (f < 0) { fprintf(stderr, "error (line %d): unknown func %s\n", n->line, n->data.call.name); exit(1); }
+            int ac = n->data.call.acount;
+            if (ac != FNS[f].params) {
+                fprintf(stderr, "error (line %d): %s expects %d args, got %d\n",
+                        n->line, n->data.call.name, FNS[f].params, ac);
+                exit(1);
+            }
+            if (ac == 0) {
+                emit_call(FNS[f].lab);
+            } else if (ac == 1) {
+                gen_expr(n->data.call.args[0]);
+                EMIT(0x48, 0x89, 0xC7);
+                emit_call(FNS[f].lab);
+            } else {
+                int pad = ((ac - 1) & 1) ? 8 : 0;
+                if (pad) EMIT(0x48, 0x83, 0xEC, 0x08);
+                for (int i = ac - 1; i >= 1; i--) { gen_expr(n->data.call.args[i]); EMIT(0x50); }
+                gen_expr(n->data.call.args[0]);
+                EMIT(0x48, 0x89, 0xC7);
+                emit_call(FNS[f].lab);
+                long popb = 8L * (ac - 1) + pad;
+                if (popb < 128) EMIT(0x48, 0x83, 0xC4, (uint8_t)popb);
+                else { EMIT(0x48, 0x81, 0xC4); emit_imm(popb, 4); }
+            }
             break;
         }
         default:
             die("unsupported expression", n->line);
     }
+}
+
+static int gen_cond(ASTNode *c) {
+    if (c->type == NODE_BINARY && c->data.binary.op >= OP_EQ && c->data.binary.op <= OP_GE) {
+        ASTNode *r = c->data.binary.right;
+        gen_expr(c->data.binary.left);
+        if (r->type == NODE_NUMBER) emit_cmp_rax_imm(r->data.number.value);
+        else if (try_leaf_rcx(r)) EMIT(0x48, 0x39, 0xC8);
+        else { EMIT(0x50); gen_expr(r); EMIT(0x59); EMIT(0x48, 0x39, 0xC1); }
+        return ((setcc_of(c->data.binary.op) & 15) | 0x80) ^ 1;
+    }
+    gen_expr(c);
+    EMIT(0x48, 0x85, 0xC0);
+    return 0x84;
 }
 
 static void gen_stmt(ASTNode *n) {
@@ -678,47 +1137,54 @@ static void gen_stmt(ASTNode *n) {
             if (n->data.let.value) gen_expr(n->data.let.value);
             Loc *l = loc_add(n->data.let.name, n->data.let.ty);
             if (n->data.let.ty->kind == 2) {
-                EMIT(0x48, 0x8D, 0x7D, (uint8_t)l->off);   
-                if (n->data.let.value) EMIT(0x48, 0x89, 0x07);   
+                EMIT(0x48, 0x8D); rbp_disp(7, l->off);
+                if (n->data.let.value) EMIT(0x48, 0x89, 0x07);
                 else {
-                    EMIT(0x48, 0x31, 0xC0);       
-                    EMIT(0xB9); emit_imm(n->data.let.ty->len, 4);  
-                    EMIT(0xF3, 0x48, 0xAB);            
+                    Type *e = n->data.let.ty->base;
+                    EMIT(0x48, 0x31, 0xC0);
+                    EMIT(0xB9); emit_imm(is_char(e) ? ty_size(n->data.let.ty) : ty_size(n->data.let.ty) / 8, 4);
+                    if (is_char(e)) EMIT(0xF3, 0xAA); else EMIT(0xF3, 0x48, 0xAB);
                 }
             } else {
                 if (!n->data.let.value) die("missing initializer", n->line);
-                EMIT(0x48, 0x89, 0x45, (uint8_t)l->off);
+                if (is_char(n->data.let.ty)) { EMIT(0x88); rbp_disp(0, l->off); }
+                else { EMIT(0x48, 0x89); rbp_disp(0, l->off); }
             }
             break;
         }
         case NODE_PRINT:
-            gen_expr(n->data.print.value);
-            EMIT(0x48, 0x89, 0xC7);         
-            EMIT(0xE8);                       
+            gen_expr(n->data.print.value);    
+            EMIT(0xE8);
             emit_imm(-(clen + 4), 4);
             break;
-        case NODE_BLOCK:
+        case NODE_BLOCK: {
+            int sn = nloc, so = cur_off;
             for (int i = 0; i < n->data.block.count; i++) gen_stmt(n->data.block.stmts[i]);
+            nloc = sn; cur_off = so;
             break;
+        }
         case NODE_IF: {
-            gen_expr(n->data.if_node.cond);
-            EMIT(0x48, 0x85, 0xC0);  
             int lab_else = new_label(), lab_end = new_label();
-            emit_jcc(0x84, lab_else);        
+            emit_jcc(gen_cond(n->data.if_node.cond), lab_else);
+            int sn = nloc, so = cur_off;
             gen_stmt(n->data.if_node.then);
+            nloc = sn; cur_off = so;
             emit_jmp(lab_end);
             put_label(lab_else);
-            if (n->data.if_node.else_) gen_stmt(n->data.if_node.else_);
+            if (n->data.if_node.else_) {
+                gen_stmt(n->data.if_node.else_);
+                nloc = sn; cur_off = so;
+            }
             put_label(lab_end);
             break;
         }
         case NODE_WHILE: {
             int lab_start = new_label(), lab_end = new_label();
             put_label(lab_start);
-            gen_expr(n->data.while_node.cond);
-            EMIT(0x48, 0x85, 0xC0);     
-            emit_jcc(0x84, lab_end);         
+            emit_jcc(gen_cond(n->data.while_node.cond), lab_end);
+            int sn = nloc, so = cur_off;
             gen_stmt(n->data.while_node.body);
+            nloc = sn; cur_off = so;
             emit_jmp(lab_start);
             put_label(lab_end);
             break;
@@ -733,54 +1199,224 @@ static void gen_stmt(ASTNode *n) {
     }
 }
 
-#define PROLOGUE EMIT(0x55, 0x48,0x89,0xE5, 0x48,0x83,0xEC,0x40) 
+static int emit_prologue(void) {
+    EMIT(0x55, 0x48,0x89,0xE5, 0x48,0x81,0xEC);
+    int p = clen;
+    emit_imm(0, 4);
+    return p;
+}
+
+static void patch_prologue(int p) {
+    int need = (-frame_min + 32 + 15) & ~15;
+    if (need < 32) need = 32;
+    *(int32_t *)(code + p) = need;
+}
+
+static int needs_frame(ASTNode *n) {
+    if (!n) return 0;
+    if (n->type == NODE_LET) return 1;
+    if (n->type == NODE_BLOCK) {
+        for (int i = 0; i < n->data.block.count; i++)
+            if (needs_frame(n->data.block.stmts[i])) return 1;
+        return 0;
+    }
+    if (n->type == NODE_IF) return needs_frame(n->data.if_node.then) || needs_frame(n->data.if_node.else_);
+    if (n->type == NODE_WHILE) return needs_frame(n->data.while_node.body);
+    return 0;
+}
+
+#define GREG_NREG 4
+static int grefs[256], gbad[256];
+
+static void scan_node(ASTNode *n, int w) {
+    if (!n || w <= 0) return;
+    switch (n->type) {
+        case NODE_VARIABLE: {
+            Glob *g = glob_find(n->data.variable.name);
+            if (g) grefs[g - GLOB] += w;
+            break;
+        }
+        case NODE_ADDR: {
+            ASTNode *v = n->data.unary.value;
+            if (v->type == NODE_VARIABLE) {
+                Glob *g = glob_find(v->data.variable.name);
+                if (g) gbad[g - GLOB] = 1;
+            } else scan_node(v, w);
+            break;
+        }
+        case NODE_NUMBER: case NODE_STR: case NODE_SIZEOF: break;   
+        case NODE_NOT: case NODE_DEREF:
+            scan_node(n->data.unary.value, w);
+            break;
+        case NODE_BINARY:
+            scan_node(n->data.binary.left, w);
+            scan_node(n->data.binary.right, w);
+            break;
+        case NODE_ASSIGN:
+            scan_node(n->data.assign.lhs, w);     
+            scan_node(n->data.assign.rhs, w);
+            break;
+        case NODE_LET:    scan_node(n->data.let.value, w); break;
+        case NODE_PRINT:  scan_node(n->data.print.value, w); break;
+        case NODE_RETURN: scan_node(n->data.return_node.value, w); break;
+        case NODE_INDEX:
+            scan_node(n->data.index.base, w);
+            scan_node(n->data.index.index, w);
+            break;
+        case NODE_CALL:
+            for (int i = 0; i < n->data.call.acount; i++) scan_node(n->data.call.args[i], w);
+            break;
+        case NODE_BLOCK:
+            for (int i = 0; i < n->data.block.count; i++) scan_node(n->data.block.stmts[i], w);
+            break;
+        case NODE_IF:
+            scan_node(n->data.if_node.cond, w);
+            scan_node(n->data.if_node.then, w);
+            scan_node(n->data.if_node.else_, w);
+            break;
+        case NODE_WHILE:
+            scan_node(n->data.while_node.cond, w * 8);
+            scan_node(n->data.while_node.body, w * 8);
+            break;
+        case NODE_FUNCTION: scan_node(n->data.function.body, w); break;
+        default: break;
+    }
+}
+
+static void pick_glob_regs(ASTNode *root) {
+    static const int RV[GREG_NREG] = { 12, 13, 14, 15 };
+    scan_node(root, 1);
+    for (int k = 0; k < GREG_NREG; k++) {
+        int best = -1;
+        for (int i = 0; i < nglob; i++) {
+            if (GLOB[i].reg || gbad[i] || !grefs[i]) continue;
+            if (GLOB[i].ty->kind == 2 || GLOB[i].ty->sz != 8) continue;  
+            if (best < 0 || grefs[i] > grefs[best]) best = i;
+        }
+        if (best < 0) return;
+        GLOB[best].reg = RV[k];
+        if (getenv("LGC_DUMP_GREG"))
+            fprintf(stderr, "[greg] %-12s -> r%-2d weight=%-6d off=%d\n",
+                    GLOB[best].name, RV[k], grefs[best], GLOB[best].off);
+    }
+}
 
 static void generate_code(ASTNode *root) {
     clen = 0;
     if (is_pe) emit_print_pe();
-    else { memcpy(code, PRINT_INT_CODE, sizeof PRINT_INT_CODE); clen = sizeof PRINT_INT_CODE; }
+    else emit_print_elf();
+    litlab = new_label();
 
+    for (int i = 0; i < root->data.block.count; i++) {
+        ASTNode *n = root->data.block.stmts[i];
+        if (n->type != NODE_LET) continue;
+        if (nglob >= (int)(sizeof GLOB / sizeof *GLOB)) die("too many globals", n->line);
+        GLOB[nglob] = (typeof(GLOB[0])){ n->data.let.name, n->data.let.ty, gsize, 0 };
+        gsize += ty_size(n->data.let.ty);
+        nglob++;
+    }
     for (int i = 0; i < root->data.block.count; i++) {
         ASTNode *f = root->data.block.stmts[i];
         if (f->type != NODE_FUNCTION) continue;
+        if (nfn >= (int)(sizeof FNS / sizeof *FNS)) die("too many functions", f->line);
         FNS[nfn] = (typeof(FNS[0])){ strdup(f->data.function.name), new_label(), f->data.function.pcount };
         nfn++;
     }
-    for (int i = 0; i < root->data.block.count; i++) { 
+
+    pick_glob_regs(root);
+    for (int i = 0; i < root->data.block.count; i++) {
         ASTNode *f = root->data.block.stmts[i];
         if (f->type != NODE_FUNCTION) continue;
         put_label(FNS[fn_find(f->data.function.name)].lab);
-        PROLOGUE;
-        nloc = 0; cur_off = 0;
-        if (f->data.function.pcount > 0) { 
-            EMIT(0x48, 0x89, 0xF8); 
-            EMIT(0x48, 0x89, 0x45, (uint8_t)loc_add(f->data.function.params[0], &TY_INT)->off);
+        int pp = emit_prologue();
+        nloc = 0; cur_off = 0; frame_min = 0;
+        if (f->data.function.pcount > 0) {
+            EMIT(0x48, 0x89, 0xF8);
+            int off = loc_add(f->data.function.params[0], &TY_INT)->off;
+            EMIT(0x48, 0x89); rbp_disp(0, off);
+        }
+        for (int k = 1; k < f->data.function.pcount; k++) {
+            int off = loc_add(f->data.function.params[k], &TY_INT)->off;
+            EMIT(0x48, 0x8B); rbp_disp(0, 16 + 8 * (k - 1));
+            EMIT(0x48, 0x89); rbp_disp(0, off);
         }
         gen_stmt(f->data.function.body);
-        EMIT(0xC9, 0xC3); 
+        EMIT(0xC9, 0xC3);
+        patch_prologue(pp);
     }
 
     put_label(new_label());
     entry = clen;
-    PROLOGUE;
-    nloc = 0; cur_off = 0;
+
+    for (int i = 0; i < nglob; i++)
+        if (GLOB[i].reg) greg_zero(GLOB[i].reg);
+    const char *ARGVN[2] = { "argv1", "argv2" };
+    for (int i = 0; i < 2; i++) {
+        Glob *a = glob_find(ARGVN[i]);
+        if (!a) continue;
+        EMIT(0x48, 0x8B, 0x44, 0x24, (uint8_t)(0x10 + 8 * i));
+        if (a->reg) { greg_store_rax(a->reg); continue; }
+        EMIT(0x48, 0x89, 0x05);
+        emit_patch(2, a->off);
+    }
+
+    int toplet = 0;
     for (int i = 0; i < root->data.block.count; i++) {
         ASTNode *n = root->data.block.stmts[i];
-        if (n->type != NODE_FUNCTION) gen_stmt(n);
+        if (n->type != NODE_FUNCTION && n->type != NODE_LET && needs_frame(n)) toplet = 1;
     }
-    if (is_pe) {
-        EMIT(0x31, 0xC9);    
+    int epp = 0;
+    if (toplet) epp = emit_prologue();
+    nloc = 0; cur_off = 0; frame_min = 0;
+    for (int i = 0; i < root->data.block.count; i++) {
+        ASTNode *n = root->data.block.stmts[i];
+        if (n->type == NODE_FUNCTION) continue;
+        if (n->type == NODE_LET) {
+            if (!n->data.let.value) continue;
+            Glob *g = glob_find(n->data.let.name);
+            gen_expr(n->data.let.value);
+            if (g && g->reg) { greg_store_rax(g->reg); continue; }   
+            EMIT(0x50);
+            EMIT(0x48, 0x8D, 0x1D);
+            emit_patch(2, g->off);
+            EMIT(0x58);
+            if (is_char(g->ty)) EMIT(0x88, 0x03);
+            else EMIT(0x48, 0x89, 0x03);
+            continue;
+        }
+        gen_stmt(n);
+    }
+    int mi = fn_find("main");
+    if (mi >= 0) {
+        EMIT(0xE8); emit_patch(0, FNS[mi].lab);   /* call main */
+        if (is_pe) {
+            EMIT(0x48, 0x89, 0xC1);               /* mov rcx, rax (exit code) */
+            emit_call_iat(2);
+        } else {
+            EMIT(0x48, 0x89, 0xC7);               /* mov rdi, rax (exit code) */
+            mov_rax_imm(60);
+            EMIT(0x0F, 0x05);
+        }
+    } else if (is_pe) {
+        EMIT(0x31, 0xC9);
         emit_call_iat(2);
+    } else {
+        mov_rax_imm(60);
+        EMIT(0x31, 0xFF);
+        EMIT(0x0F, 0x05);
+    }
+    if (toplet) patch_prologue(epp);
+    put_label(litlab);
+    if (nlit) { memcpy(code + clen, LIT, nlit); clen += nlit; }
+    pcb = (PE_SECT + 15) & ~15;
+    if (is_pe) {
         apply_patches();
-        uint32_t imp_rva = PE_SECT + ((clen + 15) & ~15);
+        uint32_t imp_rva = pcb + ((clen + 15) & ~15);
         for (int i = 0; i < niat; i++) {
             int pos = IAT_PATCH[i] >> 2, slot = IAT_PATCH[i] & 3;
-            *(int32_t *)(code + pos) = imp_rva + 72 + (slot << 3) - (PE_SECT + pos + 4);
+            *(int32_t *)(code + pos) = imp_rva + 72 + (slot << 3) - (pcb + pos + 4);
         }
     } else {
-        mov_rax_imm(60);    
-        EMIT(0x31, 0xFF);    
-        EMIT(0x0F, 0x05);   
         apply_patches();
     }
 }
@@ -789,11 +1425,11 @@ static void write_elf(const char *filename) {
     int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0755);
     if (fd < 0) { perror("open"); exit(1); }
 
-    const uint64_t hdr_size = sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr); 
+    const uint64_t hdr_size = sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr);
     const uint64_t base = 0x400000;
 
     Elf64_Ehdr ehdr = {
-        .e_ident = { 0x7f, 'E', 'L', 'F', 2, 1, 1 }, 
+        .e_ident = { 0x7f, 'E', 'L', 'F', 2, 1, 1 },
         .e_type = ET_EXEC,
         .e_machine = EM_X86_64,
         .e_version = EV_CURRENT,
@@ -805,12 +1441,12 @@ static void write_elf(const char *filename) {
     };
     Elf64_Phdr phdr = {
         .p_type = PT_LOAD,
-        .p_flags = PF_R | PF_X,
+        .p_flags = PF_R | PF_W | PF_X,
         .p_offset = 0,
         .p_vaddr = base,
         .p_paddr = base,
         .p_filesz = hdr_size + clen,
-        .p_memsz = hdr_size + clen,
+        .p_memsz = hdr_size + clen + gsize,
         .p_align = 0x1000,
     };
 
@@ -827,7 +1463,7 @@ static void write_pe(const char *filename) {
     if (fd < 0) { perror("open"); exit(1); }
 
     const uint32_t body = (clen + 15) & ~15;
-    const uint32_t imp_rva = PE_SECT + body;
+    const uint32_t imp_rva = pcb + body;
     const uint32_t vsize = body + 176;
     uint8_t h[PE_SECT] = {0}, imp[176] = {0}, zero[16] = {0};
 
@@ -840,14 +1476,14 @@ static void write_pe(const char *filename) {
     put(h + 0x56, 0x22, 2);
     put(h + 0x58, 0x20B, 2);
     put(h + 0x5C, clen, 4);
-    put(h + 0x68, PE_SECT + entry, 4);
-    put(h + 0x6C, PE_SECT, 4);
+    put(h + 0x68, pcb + entry, 4);
+    put(h + 0x6C, pcb, 4);
     put(h + 0x70, 0x400000, 8);
     put(h + 0x78, 0x10, 4);
     put(h + 0x7C, 0x10, 4);
     put(h + 0x88, 6, 2);
-    put(h + 0x90, PE_SECT + vsize, 4);
-    put(h + 0x94, PE_SECT, 4);
+    put(h + 0x90, pcb + vsize + ((gsize + 15) & ~15), 4);
+    put(h + 0x94, pcb, 4);
     put(h + 0x9C, 3, 2);
     put(h + 0xA0, 0x100000, 8);
     put(h + 0xA8, 0x1000, 8);
@@ -856,11 +1492,11 @@ static void write_pe(const char *filename) {
     put(h + 0xC4, 16, 4);
     put(h + 0xD0, imp_rva, 4);
     put(h + 0xD4, 40, 4);
-    put(h + 0x150, vsize, 4);
-    put(h + 0x154, PE_SECT, 4);
+    put(h + 0x150, vsize + gsize, 4);
+    put(h + 0x154, pcb, 4);
     put(h + 0x158, vsize, 4);
-    put(h + 0x15C, PE_SECT, 4);
-    put(h + 0x16C, 0x60000020, 4);
+    put(h + 0x15C, pcb, 4);
+    put(h + 0x16C, gsize ? 0xE00000E0 : 0x60000020, 4);
 
     put(imp + 12, imp_rva + 104, 4);
     put(imp + 16, imp_rva + 72, 4);
@@ -873,7 +1509,7 @@ static void write_pe(const char *filename) {
         off += (int)(strlen(FN[i]) + 4) & ~1;
     }
 
-    write(fd, h, PE_SECT);
+    write(fd, h, pcb);
     write(fd, code, clen);
     if (body > (uint32_t)clen) write(fd, zero, body - clen);
     write(fd, imp, 176);
