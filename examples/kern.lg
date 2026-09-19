@@ -1,6 +1,7 @@
 @nort;
 @base 0x100000;
 @entry _start;
+@bin;
 
 let char* vid = 0xB8000;
 let int ticks = 0;
@@ -17,7 +18,7 @@ func _start() {
     hlt();
     lgdt(0x1000);
     lidt(0x2000);
-    mov_cr3(0x3000);
+    setcr3(0x3000);
     outb(0x3F8, 72);
     let int v = inb(0x3F8);
     putc(65, 0);

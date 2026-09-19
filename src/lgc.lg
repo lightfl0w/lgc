@@ -150,6 +150,7 @@ let int RLAB[64]; let int RLOK[64];
 let int RPP[128]; let int RPK[128]; let int RPI[128]; let int NRPT;
 let char PB[16384]; let int NPB;
 let int IMPN; let int IMPF[64]; let int NIMF;
+let int REGN[64]; let int REGI[64]; let int NREG;
 
 
 func mod(a, b) { return a - a / b * b; }
@@ -821,7 +822,17 @@ func p16(o, v) { OUT[o] = v; OUT[o + 1] = v / 256; }
 func p32(o, v) { p16(o, v); p16(o + 2, v / 65536); }
 func p64(o, v) { p32(o, v); p32(o + 4, v / W32); }
 
+func regadd(nm, ix) { REGN[NREG] = intern(nm); REGI[NREG] = ix; NREG = NREG + 1; return 0; }
+
 func rarg(a) {
+    let int k = 0;
+    if (NTY[a] == N_VAR) {
+        k = 0;
+        while (k < NREG) {
+            if (NVV[a] == REGN[k]) return REGI[k];
+            k = k + 1;
+        }
+    }
     if (NTY[a] != N_NUM) die(0, "intrinsic argument must be a constant");
     return NVV[a];
 }
@@ -1170,6 +1181,7 @@ func gen_call(n) {
     if (NVV[n] == IRQN) { emit_iretq(); return 0; }
     if ((NVV[n] == LGDN) || (NVV[n] == LIDN) || (NVV[n] == CR3N)) {
         if (NBB[n] != 1) die(0, "intrinsic needs 1 argument");
+        if ((NVV[n] == CR3N) && (FMT == 0)) die(0, "intrinsic is only available in bin output");
         gen_expr(NAA[n]);
         if (NVV[n] == LGDN) emit_lgdt();
         if (NVV[n] == LIDN) emit_lidt();
@@ -1202,6 +1214,7 @@ func gen_call(n) {
     if (ri >= 0) {
         k = RIA[ri];
         if (NBB[n] != k) die(0, "intrinsic: wrong argument count");
+        if ((0x71FF >> ri) & 1) { if (FMT == 0) die(0, "intrinsic is only available in bin output"); }
         if (k > 0) x0 = rarg(NAA[n]);
         if (k > 1) x1 = rarg(NNX[NAA[n]]);
         if (ri == 0) { e8(176 + mod(x0, 8)); e8(x1); return 0; }
@@ -1677,13 +1690,13 @@ func main() {
     DRAWN = intern("raw");
     DBOOT = intern("boot");
     ASMN = intern("asm"); CLIN = intern("cli"); STIN = intern("sti"); HLTN = intern("hlt");
-    IRQN = intern("iretq"); LGDN = intern("lgdt"); LIDN = intern("lidt"); CR3N = intern("mov_cr3");
+    IRQN = intern("iretq"); LGDN = intern("lgdt"); LIDN = intern("lidt"); CR3N = intern("setcr3");
     INBN = intern("inb"); INLN = intern("inl"); OUTBN = intern("outb"); OUTLN = intern("outl");
-    RINM[0] = intern("movb"); RINM[1] = intern("movw"); RINM[2] = intern("movl"); RINM[3] = intern("movq");
-    RINM[4] = intern("xorw"); RINM[5] = intern("xorl"); RINM[6] = intern("movsreg");
-    RINM[7] = intern("orb"); RINM[8] = intern("orl"); RINM[9] = intern("int_n");
-    RINM[10] = intern("in_al"); RINM[11] = intern("out_al"); RINM[12] = intern("cr_read"); RINM[13] = intern("cr_write");
-    RINM[14] = intern("store32"); RINM[15] = intern("cld"); RINM[16] = intern("rdmsr"); RINM[17] = intern("wrmsr");
+    RINM[0] = intern("set8"); RINM[1] = intern("set16"); RINM[2] = intern("set32"); RINM[3] = intern("set64");
+    RINM[4] = intern("xor16"); RINM[5] = intern("xor32"); RINM[6] = intern("setseg");
+    RINM[7] = intern("or8"); RINM[8] = intern("or32"); RINM[9] = intern("int_n");
+    RINM[10] = intern("in_al"); RINM[11] = intern("out_al"); RINM[12] = intern("readcr"); RINM[13] = intern("writecr");
+    RINM[14] = intern("setmem32"); RINM[15] = intern("cld"); RINM[16] = intern("rdmsr"); RINM[17] = intern("wrmsr");
     RINM[18] = intern("rep_movsq"); RINM[19] = intern("jmp_rax"); RINM[20] = intern("label");
     RINM[21] = intern("ljmp16"); RINM[22] = intern("ljmp32"); RINM[23] = intern("jc"); RINM[24] = intern("jmp");
     RINM[25] = intern("lgdt_at"); RINM[26] = intern("gdt_desc16");
@@ -1691,6 +1704,14 @@ func main() {
     RIA[7] = 2; RIA[8] = 2; RIA[9] = 1; RIA[10] = 1; RIA[11] = 1; RIA[12] = 2; RIA[13] = 2;
     RIA[14] = 2; RIA[15] = 0; RIA[16] = 0; RIA[17] = 0; RIA[18] = 0; RIA[19] = 0;
     RIA[20] = 1; RIA[21] = 2; RIA[22] = 2; RIA[23] = 1; RIA[24] = 1; RIA[25] = 1; RIA[26] = 2;
+    NREG = 0;
+    regadd("AL", 0); regadd("CL", 1); regadd("DL", 2); regadd("BL", 3); regadd("AH", 4); regadd("CH", 5); regadd("DH", 6); regadd("BH", 7);
+    regadd("AX", 0); regadd("CX", 1); regadd("DX", 2); regadd("BX", 3); regadd("SP", 4); regadd("BP", 5); regadd("SI", 6); regadd("DI", 7);
+    regadd("EAX", 0); regadd("ECX", 1); regadd("EDX", 2); regadd("EBX", 3); regadd("ESP", 4); regadd("EBP", 5); regadd("ESI", 6); regadd("EDI", 7);
+    regadd("RAX", 0); regadd("RCX", 1); regadd("RDX", 2); regadd("RBX", 3); regadd("RSP", 4); regadd("RBP", 5); regadd("RSI", 6); regadd("RDI", 7);
+    regadd("R8", 8); regadd("R9", 9); regadd("R10", 10); regadd("R11", 11); regadd("R12", 12); regadd("R13", 13); regadd("R14", 14); regadd("R15", 15);
+    regadd("ES", 0); regadd("CS", 1); regadd("SS", 2); regadd("DS", 3); regadd("FS", 4); regadd("GS", 5);
+    regadd("CR0", 0); regadd("CR2", 2); regadd("CR3", 3); regadd("CR4", 4); regadd("CR8", 8);
     NB[0] = 97; NB[1] = 114; NB[2] = 103; NB[3] = 118;
     i = 0;
     while (i < 8) { NB[4] = 49 + i; NB[5] = 0; AVN[i] = intern(NB); i = i + 1; }

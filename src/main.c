@@ -647,6 +647,7 @@ static char *entry_name;
 static int freestanding;
 static int raw_mode;
 static int boot_mode;
+static int bin_fmt;
 static int printlab;
 
 static void parse_directive(Parser *p) {
@@ -696,9 +697,9 @@ enum {
     RI_LABEL, RI_LJMP16, RI_LJMP32, RI_JC, RI_JMP, RI_LGDTAT, RI_GDTDESC
 };
 static const char *RINAME[] = {
-    "movb", "movw", "movl", "movq", "xorw", "xorl", "movsreg",
-    "orb", "orl", "int_n", "in_al", "out_al", "cr_read", "cr_write",
-    "store32", "cld", "rdmsr", "wrmsr", "rep_movsq", "jmp_rax",
+    "set8", "set16", "set32", "set64", "xor16", "xor32", "setseg",
+    "or8", "or32", "int_n", "in_al", "out_al", "readcr", "writecr",
+    "setmem32", "cld", "rdmsr", "wrmsr", "rep_movsq", "jmp_rax",
     "label", "ljmp16", "ljmp32", "jc", "jmp", "lgdt_at", "gdt_desc16"
 };
 static const int RINARG[] = {
@@ -709,7 +710,25 @@ static int rawlab[64], rawlab_ok[64];
 static struct { int pos, kind, id; } RPATCH[128];
 static int nrpatch;
 
+static const struct { const char *name; int idx; } REGS[] = {
+    { "AL", 0 }, { "CL", 1 }, { "DL", 2 }, { "BL", 3 }, { "AH", 4 }, { "CH", 5 }, { "DH", 6 }, { "BH", 7 },
+    { "AX", 0 }, { "CX", 1 }, { "DX", 2 }, { "BX", 3 }, { "SP", 4 }, { "BP", 5 }, { "SI", 6 }, { "DI", 7 },
+    { "EAX", 0 }, { "ECX", 1 }, { "EDX", 2 }, { "EBX", 3 }, { "ESP", 4 }, { "EBP", 5 }, { "ESI", 6 }, { "EDI", 7 },
+    { "RAX", 0 }, { "RCX", 1 }, { "RDX", 2 }, { "RBX", 3 }, { "RSP", 4 }, { "RBP", 5 }, { "RSI", 6 }, { "RDI", 7 },
+    { "R8", 8 }, { "R9", 9 }, { "R10", 10 }, { "R11", 11 }, { "R12", 12 }, { "R13", 13 }, { "R14", 14 }, { "R15", 15 },
+    { "ES", 0 }, { "CS", 1 }, { "SS", 2 }, { "DS", 3 }, { "FS", 4 }, { "GS", 5 },
+    { "CR0", 0 }, { "CR2", 2 }, { "CR3", 3 }, { "CR4", 4 }, { "CR8", 8 }
+};
+static int reg_index(const char *n) {
+    for (int i = 0; i < (int)(sizeof REGS / sizeof *REGS); i++)
+        if (!strcmp(REGS[i].name, n)) return REGS[i].idx;
+    return -1;
+}
 static long cval(ASTNode *a, int line) {
+    if (a && a->type == NODE_VARIABLE) {
+        int r = reg_index(a->data.variable.name);
+        if (r >= 0) return r;
+    }
     if (!a || a->type != NODE_NUMBER) die("intrinsic argument must be a constant", line);
     return (long)a->data.number.value;
 }
@@ -1300,8 +1319,9 @@ static void gen_expr(ASTNode *n) {
             if (!strcmp(nm, "sti"))   { EMIT(0xFB); break; }
             if (!strcmp(nm, "hlt"))   { EMIT(0xF4); break; }
             if (!strcmp(nm, "iretq")) { EMIT(0x48, 0xCF); break; }
-            if (!strcmp(nm, "lgdt") || !strcmp(nm, "lidt") || !strcmp(nm, "mov_cr3")) {
+            if (!strcmp(nm, "lgdt") || !strcmp(nm, "lidt") || !strcmp(nm, "setcr3")) {
                 if (ac != 1) die("intrinsic needs 1 argument", n->line);
+                if (!strcmp(nm, "setcr3") && !bin_fmt) die("intrinsic is only available in bin output", n->line);
                 gen_expr(n->data.call.args[0]);
                 if (!strcmp(nm, "lgdt")) EMIT(0x0F, 0x01, 0x10);        /* lgdt [rax] */
                 else if (!strcmp(nm, "lidt")) EMIT(0x0F, 0x01, 0x18);   /* lidt [rax] */
@@ -1334,6 +1354,7 @@ static void gen_expr(ASTNode *n) {
                     if (!strcmp(nm, RINAME[k])) { ri = k; break; }
                 if (ri < 0) goto not_intrinsic;
                 if (ac != RINARG[ri]) die("intrinsic: wrong argument count", n->line);
+                if (((0x71FFu >> ri) & 1) && !bin_fmt) die("intrinsic is only available in bin output", n->line);
                 long a0 = ac > 0 ? cval(n->data.call.args[0], n->line) : 0;
                 long a1 = ac > 1 ? cval(n->data.call.args[1], n->line) : 0;
                 switch (ri) {
@@ -1687,7 +1708,7 @@ static void emit_entry(ASTNode *root) {
 }
 
 static void generate_code(ASTNode *root) {
-    int bin = (fmt == FMT_BIN);
+    bin_fmt = (fmt == FMT_BIN);
     clen = 0;
     if (raw_mode) {
         litlab = new_label();
@@ -1734,7 +1755,7 @@ static void generate_code(ASTNode *root) {
 
     pick_glob_regs(root);
 
-    if (bin) { entry = clen; emit_entry(root); }
+    if (bin_fmt) { entry = clen; emit_entry(root); }
 
     if (boot_mode) {
         printlab = new_label();
@@ -1763,7 +1784,7 @@ static void generate_code(ASTNode *root) {
         patch_prologue(pp);
     }
 
-    if (!bin) { entry = clen; emit_entry(root); }
+    if (!bin_fmt) { entry = clen; emit_entry(root); }
 
     put_label(litlab);
     if (nlit) { memcpy(code + clen, LIT, nlit); clen += nlit; }
