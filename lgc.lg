@@ -9,39 +9,46 @@ const T_FUNC = 7;
 const T_SIZEOF = 8;
 const T_INT = 9;
 const T_CHAR = 10;
-const T_IDENT = 11;
-const T_NUM = 12;
-const T_STR = 13;
-const T_PLUS = 14;
-const T_MINUS = 15;
-const T_STAR = 16;
-const T_SLASH = 17;
-const T_AMP = 18;
-const T_LBR = 19;
-const T_RBR = 20;
-const T_SEMI = 21;
-const T_COMMA = 22;
-const T_LP = 23;
-const T_RP = 24;
-const T_LBRACE = 25;
-const T_RBRACE = 26;
-const T_ASSIGN = 27;
-const T_EQ = 28;
-const T_NE = 29;
-const T_LT = 30;
-const T_GT = 31;
-const T_LE = 32;
-const T_GE = 33;
-const T_CONST = 34;
-const T_ANDAND = 35;
-const T_OROR = 36;
-const T_NOT = 37;
-const T_PLUSEQ = 38;
-const T_MINUSEQ = 39;
-const T_STAREQ = 40;
-const T_SLASHEQ = 41;
-const T_MODEQ = 42;
-const T_PERCENT = 43;
+const T_BREAK = 11;
+const T_CONTINUE = 12;
+const T_IDENT = 13;
+const T_NUM = 14;
+const T_STR = 15;
+const T_PLUS = 16;
+const T_MINUS = 17;
+const T_STAR = 18;
+const T_SLASH = 19;
+const T_AMP = 20;
+const T_PIPE = 21;
+const T_CARET = 22;
+const T_TILDE = 23;
+const T_SHL = 24;
+const T_SHR = 25;
+const T_LBR = 26;
+const T_RBR = 27;
+const T_SEMI = 28;
+const T_COMMA = 29;
+const T_LP = 30;
+const T_RP = 31;
+const T_LBRACE = 32;
+const T_RBRACE = 33;
+const T_ASSIGN = 34;
+const T_EQ = 35;
+const T_NE = 36;
+const T_LT = 37;
+const T_GT = 38;
+const T_LE = 39;
+const T_GE = 40;
+const T_CONST = 41;
+const T_ANDAND = 42;
+const T_OROR = 43;
+const T_NOT = 44;
+const T_PLUSEQ = 45;
+const T_MINUSEQ = 46;
+const T_STAREQ = 47;
+const T_SLASHEQ = 48;
+const T_MODEQ = 49;
+const T_PERCENT = 50;
 
 const N_NUM = 1;
 const N_VAR = 2;
@@ -61,6 +68,9 @@ const N_ASSIGN = 15;
 const N_SIZEOF = 16;
 const N_STR = 17;
 const N_NOT = 18;
+const N_BNOT = 19;
+const N_BREAK = 20;
+const N_CONTINUE = 21;
 
 const O_ADD = 0;
 const O_SUB = 1;
@@ -75,6 +85,11 @@ const O_GE = 9;
 const O_MOD = 10;
 const O_AND = 11;
 const O_OR = 12;
+const O_BOR = 13;
+const O_BAND = 14;
+const O_BXOR = 15;
+const O_SHL = 16;
+const O_SHR = 17;
 
 const W32 = 4294967296;
 const K_PTR = 1099511627776;
@@ -109,7 +124,8 @@ let int GRN[256]; let int GTY[256]; let int GOF[256]; let int NGLB; let int GSZ;
 let int LBP[2048]; let int NLAB;
 let int PTP[8192]; let int PTV[8192]; let int PTG[8192]; let int NPT;
 let int CNN[256]; let int CNV[256]; let int NCN;
-let int KWT[10]; let int BINP[64]; let int P1[128]; let int P2[128];
+let int KWT[12]; let int BINP[64]; let int P1[128]; let int P2[128];
+let int BRL[64]; let int CTL[64]; let int NLOOP;
 let int PST; let int LN; let int SRCI; let int CUROFF;
 let int LITLAB; let int PRINTL; let int ENTRY; let int ROOT; let int SYSP; let int CNAME; let int A1N; let int A2N;
 let int HDR; let int SEG2;
@@ -216,7 +232,7 @@ func lexone() {
     SRCI = SRCI + 1;
     while ((SRCI < NSRC) && (alpha(SRC[SRCI]) || digit(SRC[SRCI]))) SRCI = SRCI + 1;
     t = T_IDENT;
-    while (k < 10) {
+    while (k < 12) {
       if (spmatch(s, SRCI, KWT[k])) t = k + 1;
       k = k + 1;
     }
@@ -268,6 +284,11 @@ func lexone() {
   if (c > 127) die(LN, "bad character");
   if ((c == '&') && (SRC[SRCI + 1] == '&')) { addtok(T_ANDAND, 0); SRCI = SRCI + 2; return 0; }
   if ((c == '|') && (SRC[SRCI + 1] == '|')) { addtok(T_OROR, 0); SRCI = SRCI + 2; return 0; }
+  if (((c == '<') || (c == '>')) && (SRC[SRCI + 1] == c)) {
+    if (c == '<') addtok(T_SHL, 0); else addtok(T_SHR, 0);
+    SRCI = SRCI + 2;
+    return 0;
+  }
   NX = SRC[SRCI + 1] == '=';
   if (NX && P2[c]) { addtok(P2[c], 0); SRCI = SRCI + 2; return 0; }
   t = P1[c];
@@ -380,16 +401,17 @@ func unary() {
   if (tk() == T_AMP)  { PST = PST + 1; return nd(N_ADDR, unary(), 0, 0); }
   if (tk() == T_STAR) { PST = PST + 1; return nd(N_DEREF, unary(), 0, 0); }
   if (tk() == T_SIZEOF) { PST = PST + 1; return nd(N_SIZEOF, unary(), 0, 0); }
+  if (tk() == T_TILDE) { PST = PST + 1; return nd(N_BNOT, unary(), 0, 0); }
   return postfix();
 }
 
 func bin(m) {
   let int n = unary();
   let int e = 0;
-  while (BINP[tk()] && (BINP[tk()] / 16 >= m)) {
+  while (BINP[tk()] && (BINP[tk()] / 32 >= m)) {
     e = BINP[tk()];
     PST = PST + 1;
-    n = nd(N_BIN, n, bin(e / 16 + 1), e - e / 16 * 16);
+    n = nd(N_BIN, n, bin(e / 32 + 1), e - e / 32 * 32);
   }
   return n;
 }
@@ -457,6 +479,8 @@ func stmt() {
     NBB[n] = stmt();
     return n;
   }
+  if (t == T_BREAK) { PST = PST + 1; eat(T_SEMI, "expected ;"); return nd(N_BREAK, 0, 0, 0); }
+  if (t == T_CONTINUE) { PST = PST + 1; eat(T_SEMI, "expected ;"); return nd(N_CONTINUE, 0, 0, 0); }
   if (t == T_RETURN) { PST = PST + 1; n = nd(N_RET, exprn(), 0, 0); eat(T_SEMI, "expected ;"); return n; }
   if (t == T_LBRACE) {
     PST = PST + 1;
@@ -668,6 +692,17 @@ func add_rbx_rax()     { e8(72); e8(1); e8(216); }
 func sub_rbx_rax()     { e8(72); e8(147); e8(72); e8(41); e8(216); }
 func mul_rbx()         { e8(72); e8(15); e8(175); e8(195); }
 func div_rbx()         { e8(72); e8(147); e8(72); e8(153); e8(72); e8(247); e8(251); }
+func or_rax_rcx()      { e8(72); e8(9); e8(200); }
+func and_rax_rcx()     { e8(72); e8(33); e8(200); }
+func xor_rax_rcx()     { e8(72); e8(49); e8(200); }
+func shl_rax_cl()      { e8(72); e8(211); e8(224); }
+func sar_rax_cl()      { e8(72); e8(211); e8(248); }
+func or_rax_rbx()      { e8(72); e8(9); e8(216); }
+func and_rax_rbx()     { e8(72); e8(33); e8(216); }
+func xor_rax_rbx()     { e8(72); e8(49); e8(216); }
+func xchg_rax_rbx()    { e8(72); e8(147); }
+func mov_rcx_rbx()     { e8(72); e8(137); e8(217); }
+func not_rax()         { e8(72); e8(247); e8(208); }
 func shl_rax_3()       { e8(72); e8(193); e8(224); e8(3); }
 func setcc_al(op)      { e8(15); e8(setcc(op)); e8(192); e8(72); e8(15); e8(182); e8(192); }
 func add_rsp(n)        { e8(72); e8(131); e8(196); e8(n); }
@@ -762,6 +797,7 @@ func gen_expr(n) {
     return 0;
   }
   if (t == N_NOT) { gen_expr(NAA[n]); test_rax(); setcc_al(O_EQ); return 0; }
+  if (t == N_BNOT) { gen_expr(NAA[n]); not_rax(); return 0; }
   if (t == N_ASSIGN) {
     i = NVV[n];
     gen_addr(NAA[n]);
@@ -829,11 +865,25 @@ func gen_expr(n) {
       if (i == O_MOD) { e8(72); e8(137); e8(208); return 0; }
       return 0;
     }
+    if ((i == O_BOR) && try_rcx(NBB[n])) { or_rax_rcx(); return 0; }
+    if ((i == O_BAND) && try_rcx(NBB[n])) { and_rax_rcx(); return 0; }
+    if ((i == O_BXOR) && try_rcx(NBB[n])) { xor_rax_rcx(); return 0; }
+    if ((i == O_SHL) && try_rcx(NBB[n])) { shl_rax_cl(); return 0; }
+    if ((i == O_SHR) && try_rcx(NBB[n])) { sar_rax_cl(); return 0; }
     push_rax();
     gen_expr(NBB[n]); pop_rbx();
     if (i == O_ADD) { add_rbx_rax(); return 0; }
     if (i == O_SUB) { sub_rbx_rax(); return 0; }
     if (i == O_MUL) { mul_rbx(); return 0; }
+    if (i == O_BOR) { or_rax_rbx(); return 0; }
+    if (i == O_BAND) { and_rax_rbx(); return 0; }
+    if (i == O_BXOR) { xor_rax_rbx(); return 0; }
+    if ((i == O_SHL) || (i == O_SHR)) {
+      xchg_rax_rbx();
+      mov_rcx_rbx();
+      if (i == O_SHL) shl_rax_cl(); else sar_rax_cl();
+      return 0;
+    }
     div_rbx();
     if (i == O_MOD) { e8(72); e8(137); e8(208); return 0; }
     return 0;
@@ -926,6 +976,7 @@ func gen_stmt(n) {
   }
   if (t == N_WHILE) {
     l1 = lab_new(); l2 = lab_new();
+    BRL[NLOOP] = l2; CTL[NLOOP] = l1; NLOOP = NLOOP + 1;
     put_lab(l1);
     gen_expr(NAA[n]);
     test_rax();
@@ -933,8 +984,11 @@ func gen_stmt(n) {
     gen_stmt(NBB[n]);
     jmp_rel(l1);
     put_lab(l2);
+    NLOOP = NLOOP - 1;
     return 0;
   }
+  if (t == N_BREAK) { jmp_rel(BRL[NLOOP - 1]); return 0; }
+  if (t == N_CONTINUE) { jmp_rel(CTL[NLOOP - 1]); return 0; }
   if (t == N_RET) { gen_expr(NAA[n]); leave_ret(); return 0; }
   gen_expr(n);
   return 0;
@@ -1115,16 +1169,21 @@ func main() {
   KWT[7] = intern("sizeof");
   KWT[8] = intern("int");
   KWT[9] = intern("char");
+  KWT[10] = intern("break");
+  KWT[11] = intern("continue");
   P1['+'] = T_PLUS; P1['-'] = T_MINUS; P1['*'] = T_STAR; P1['/'] = T_SLASH; P1['&'] = T_AMP;
   P1['%'] = T_PERCENT; P1['!'] = T_NOT;
   P1['['] = T_LBR; P1[']'] = T_RBR; P1[';'] = T_SEMI; P1[','] = T_COMMA; P1['('] = T_LP; P1[')'] = T_RP;
   P1['{'] = T_LBRACE; P1['}'] = T_RBRACE; P1['='] = T_ASSIGN; P1['<'] = T_LT; P1['>'] = T_GT;
+  P1['|'] = T_PIPE; P1['^'] = T_CARET; P1['~'] = T_TILDE;
   P2['='] = T_EQ; P2['!'] = T_NE; P2['<'] = T_LE; P2['>'] = T_GE;
   P2['+'] = T_PLUSEQ; P2['-'] = T_MINUSEQ; P2['*'] = T_STAREQ; P2['/'] = T_SLASHEQ; P2['%'] = T_MODEQ;
-  BINP[T_EQ] = 52; BINP[T_NE] = 53; BINP[T_LT] = 54; BINP[T_GT] = 55; BINP[T_LE] = 56; BINP[T_GE] = 57;
-  BINP[T_ANDAND] = 43; BINP[T_OROR] = 28;
-  BINP[T_PLUS] = 64; BINP[T_MINUS] = 65;
-  BINP[T_STAR] = 82; BINP[T_SLASH] = 83; BINP[T_PERCENT] = 90;
+  BINP[T_EQ] = 196; BINP[T_NE] = 197; BINP[T_LT] = 198; BINP[T_GT] = 199; BINP[T_LE] = 200; BINP[T_GE] = 201;
+  BINP[T_ANDAND] = 75; BINP[T_OROR] = 44;
+  BINP[T_PIPE] = 109; BINP[T_CARET] = 143; BINP[T_AMP] = 174;
+  BINP[T_SHL] = 272; BINP[T_SHR] = 273;
+  BINP[T_PLUS] = 288; BINP[T_MINUS] = 289;
+  BINP[T_STAR] = 322; BINP[T_SLASH] = 323; BINP[T_PERCENT] = 330;
   SYSP = intern("syscall");
   CNAME = intern("const");
   A1N = intern("argv1");

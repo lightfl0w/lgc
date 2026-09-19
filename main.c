@@ -54,11 +54,12 @@ static void die(const char *msg, int line) {
 
 typedef enum {
     TOK_LET, TOK_PRINT, TOK_IF, TOK_ELSE, TOK_WHILE, TOK_RETURN, TOK_FUNC,
-    TOK_SIZEOF, TOK_INT, TOK_CHAR, TOK_CONST,
+    TOK_SIZEOF, TOK_INT, TOK_CHAR, TOK_CONST, TOK_BREAK, TOK_CONTINUE,
     TOK_STR,
     TOK_IDENTIFIER, TOK_NUMBER,
     TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH,
-    TOK_AMP, TOK_LBRACKET, TOK_RBRACKET,
+    TOK_AMP, TOK_PIPE, TOK_CARET, TOK_TILDE, TOK_SHL, TOK_SHR,
+    TOK_LBRACKET, TOK_RBRACKET,
     TOK_ASSIGN, TOK_EQ, TOK_NE, TOK_LT, TOK_GT, TOK_LE, TOK_GE,
     TOK_SEMICOLON, TOK_COMMA,
     TOK_LPAREN, TOK_RPAREN, TOK_LBRACE, TOK_RBRACE,
@@ -75,13 +76,13 @@ static Token tok(TokenType t, const char *s, int len, int line) {
     return tk;
 }
 
-static const char *KWD[] = { "let", "print", "if", "else", "while", "return", "func", "sizeof", "int", "char", "const" };
+static const char *KWD[] = { "let", "print", "if", "else", "while", "return", "func", "sizeof", "int", "char", "const", "break", "continue" };
 
 static const uint64_t PUNCT_BIT[2] = {
     (1ULL << 33) | (1ULL << 37) | (1ULL << 38) | (1ULL << 40) | (1ULL << 41) | (1ULL << 42) | (1ULL << 43) |
     (1ULL << 44) | (1ULL << 45) | (1ULL << 47) | (1ULL << 59) |
     (1ULL << 60) | (1ULL << 61) | (1ULL << 62),
-    (1ULL << 27) | (1ULL << 29) | (1ULL << 59) | (1ULL << 60) | (1ULL << 61),
+    (1ULL << 27) | (1ULL << 29) | (1ULL << 30) | (1ULL << 59) | (1ULL << 60) | (1ULL << 61) | (1ULL << 62),
 };
 
 static const uint64_t PAIR_BIT[2] = {
@@ -96,7 +97,7 @@ static const TokenType CHAR_TOK[128] = {
     [';'] = TOK_SEMICOLON, [','] = TOK_COMMA,
     ['('] = TOK_LPAREN, [')'] = TOK_RPAREN, ['{'] = TOK_LBRACE, ['}'] = TOK_RBRACE,
     ['='] = TOK_ASSIGN, ['!'] = TOK_NOT, ['<'] = TOK_LT, ['>'] = TOK_GT,
-    ['|'] = TOK_ERROR,
+    ['|'] = TOK_PIPE, ['^'] = TOK_CARET, ['~'] = TOK_TILDE,
 };
 
 static const TokenType PAIR2_TOK[128] = {
@@ -124,7 +125,7 @@ static Token next_token(Lexer *lx) {
     if (isalpha(c) || c == '_') {
         while (isalnum(lx->src[lx->pos]) || lx->src[lx->pos] == '_') lx->pos++;
         int len = lx->pos - s;
-        for (int i = 0; i < 11; i++)
+        for (int i = 0; i < 13; i++)
             if (len == (int)strlen(KWD[i]) && !memcmp(&lx->src[s], KWD[i], len))
                 return tok(TOK_LET + i, &lx->src[s], len, line);
         return tok(TOK_IDENTIFIER, &lx->src[s], len, line);
@@ -172,6 +173,10 @@ static Token next_token(Lexer *lx) {
         lx->pos = s + 2;
         return tok(TOK_OROR, &lx->src[s], 2, line);
     }
+    if ((c == '<' || c == '>') && lx->src[s + 1] == c) {
+        lx->pos = s + 2;
+        return tok(c == '<' ? TOK_SHL : TOK_SHR, &lx->src[s], 2, line);
+    }
     lx->pos++;
     unsigned char uc = (unsigned char)c;
     if (uc >= 128 || !(PUNCT_BIT[uc >> 6] >> (uc & 63) & 1)) 
@@ -189,9 +194,11 @@ static Token next_token(Lexer *lx) {
 typedef enum {
     NODE_NUMBER, NODE_VARIABLE, NODE_BINARY, NODE_LET, NODE_PRINT,
     NODE_BLOCK, NODE_IF, NODE_WHILE, NODE_RETURN, NODE_FUNCTION, NODE_CALL,
-    NODE_ADDR, NODE_DEREF, NODE_INDEX, NODE_ASSIGN, NODE_SIZEOF, NODE_STR, NODE_NOT
+    NODE_ADDR, NODE_DEREF, NODE_INDEX, NODE_ASSIGN, NODE_SIZEOF, NODE_STR, NODE_NOT,
+    NODE_BNOT, NODE_BREAK, NODE_CONTINUE
 } NodeType;
-typedef enum { OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_EQ, OP_NE, OP_LT, OP_GT, OP_LE, OP_GE, OP_MOD, OP_AND, OP_OR } BinOp;
+typedef enum { OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_EQ, OP_NE, OP_LT, OP_GT, OP_LE, OP_GE, OP_MOD, OP_AND, OP_OR,
+               OP_BOR, OP_BAND, OP_BXOR, OP_SHL, OP_SHR } BinOp;
 
 typedef struct Type { uint8_t kind; int len; uint8_t sz; struct Type *base; } Type;
 
@@ -256,6 +263,11 @@ static ASTNode *mkbin(BinOp op, ASTNode *l, ASTNode *r, int line) {
             case OP_GE:  v = a >= b; break;
             case OP_AND: v = a && b; break;
             case OP_OR:  v = a || b; break;
+            case OP_BOR:  v = a | b; break;
+            case OP_BAND: v = a & b; break;
+            case OP_BXOR: v = a ^ b; break;
+            case OP_SHL:  v = a << (b & 63); break;
+            case OP_SHR:  v = a >> (b & 63); break;
         }
         ASTNode *n = node(NODE_NUMBER, line);
         n->data.number.value = v;
@@ -285,15 +297,19 @@ static void expect(Parser *p, TokenType t, const char *what) {
     adv(p);
 }
 
-static const uint8_t BINOP[TOK_ERROR + 1] = {
-    [TOK_EQ] = OP_EQ | 3 << 4,  [TOK_NE] = OP_NE | 3 << 4,
-    [TOK_LT] = OP_LT | 3 << 4,  [TOK_GT] = OP_GT | 3 << 4,
-    [TOK_LE] = OP_LE | 3 << 4,  [TOK_GE] = OP_GE | 3 << 4,
-    [TOK_PLUS] = OP_ADD | 4 << 4, [TOK_MINUS] = OP_SUB | 4 << 4,
-    [TOK_STAR] = OP_MUL | 5 << 4, [TOK_SLASH] = OP_DIV | 5 << 4,
-    [TOK_PERCENT] = OP_MOD | 5 << 4,
-    [TOK_ANDAND] = OP_AND | 2 << 4,
-    [TOK_OROR] = OP_OR | 1 << 4,
+static const uint16_t BINOP[TOK_ERROR + 1] = {
+    [TOK_EQ] = OP_EQ | 6 << 5,  [TOK_NE] = OP_NE | 6 << 5,
+    [TOK_LT] = OP_LT | 6 << 5,  [TOK_GT] = OP_GT | 6 << 5,
+    [TOK_LE] = OP_LE | 6 << 5,  [TOK_GE] = OP_GE | 6 << 5,
+    [TOK_PLUS] = OP_ADD | 9 << 5, [TOK_MINUS] = OP_SUB | 9 << 5,
+    [TOK_STAR] = OP_MUL | 10 << 5, [TOK_SLASH] = OP_DIV | 10 << 5,
+    [TOK_PERCENT] = OP_MOD | 10 << 5,
+    [TOK_ANDAND] = OP_AND | 2 << 5,
+    [TOK_OROR] = OP_OR | 1 << 5,
+    [TOK_PIPE] = OP_BOR | 3 << 5,
+    [TOK_CARET] = OP_BXOR | 4 << 5,
+    [TOK_AMP] = OP_BAND | 5 << 5,
+    [TOK_SHL] = OP_SHL | 8 << 5, [TOK_SHR] = OP_SHR | 8 << 5,
 };
 
 static uint8_t LIT[16384];
@@ -416,6 +432,9 @@ static ASTNode *parse_unary(Parser *p) {
         case TOK_NOT:
             adv(p);
             { ASTNode *n = node(NODE_NOT, line); n->data.unary.value = parse_unary(p); return n; }
+        case TOK_TILDE:
+            adv(p);
+            { ASTNode *n = node(NODE_BNOT, line); n->data.unary.value = parse_unary(p); return n; }
         case TOK_SIZEOF:
             adv(p);
             { ASTNode *n = node(NODE_SIZEOF, line); n->data.unary.value = parse_unary(p); return n; }
@@ -427,11 +446,11 @@ static ASTNode *parse_unary(Parser *p) {
 static ASTNode *parse_bin(Parser *p, int min_prec) {
     ASTNode *l = parse_unary(p);
     for (;;) {
-        uint8_t e = BINOP[p->cur.type];
-        if ((e >> 4) < min_prec) return l;
+        uint16_t e = BINOP[p->cur.type];
+        if ((e >> 5) < min_prec) return l;
         Token t = p->cur;
         adv(p);
-        l = mkbin((BinOp)(e & 15), l, parse_bin(p, (e >> 4) + 1), t.line);
+        l = mkbin((BinOp)(e & 31), l, parse_bin(p, (e >> 5) + 1), t.line);
     }
 }
 
@@ -536,6 +555,14 @@ static ASTNode *parse_statement(Parser *p) {
             n->data.while_node.body = parse_statement(p);
             return n;
         }
+        case TOK_BREAK:
+            adv(p);
+            expect(p, TOK_SEMICOLON, "expected ';'");
+            return node(NODE_BREAK, t.line);
+        case TOK_CONTINUE:
+            adv(p);
+            expect(p, TOK_SEMICOLON, "expected ';'");
+            return node(NODE_CONTINUE, t.line);
         case TOK_RETURN: {
             adv(p);
             ASTNode *n = node(NODE_RETURN, t.line);
@@ -695,6 +722,7 @@ static Loc *loc_find(const char *name) {
 
 static struct { char *name; int lab, params; } FNS[256];
 static int nfn;
+static int brk_lab[64], cont_lab[64], nloop;
 static int fn_find(const char *name) {
     for (int i = 0; i < nfn; i++)
         if (!strcmp(FNS[i].name, name)) return i;
@@ -712,6 +740,11 @@ static void emit_binop(BinOp op) {
         case OP_MUL: EMIT(0x48, 0x0F, 0xAF, 0xC1); break;
         case OP_DIV: EMIT(0x48, 0x99, 0x48, 0xF7, 0xF9); break;
         case OP_MOD: EMIT(0x48, 0x99, 0x48, 0xF7, 0xF9, 0x48, 0x89, 0xD0); break;
+        case OP_BOR:  EMIT(0x48, 0x09, 0xC8); break;
+        case OP_BAND: EMIT(0x48, 0x21, 0xC8); break;
+        case OP_BXOR: EMIT(0x48, 0x31, 0xC8); break;
+        case OP_SHL:  EMIT(0x48, 0xD3, 0xE0); break;
+        case OP_SHR:  EMIT(0x48, 0xD3, 0xF8); break;
         default:
             EMIT(0x48, 0x39, 0xC8);
             EMIT(0x0F, setcc_of(op), 0xC0);
@@ -995,6 +1028,10 @@ static void gen_expr(ASTNode *n) {
             EMIT(0x0F, 0x94, 0xC0);             /* sete al */
             EMIT(0x0F, 0xB6, 0xC0);             /* movzx rax,al */
             break;
+        case NODE_BNOT:
+            gen_expr(n->data.unary.value);
+            EMIT(0x48, 0xF7, 0xD0);             /* not rax */
+            break;
         case NODE_BINARY: {
             BinOp op = n->data.binary.op;
             ASTNode *r = n->data.binary.right;
@@ -1049,6 +1086,24 @@ static void gen_expr(ASTNode *n) {
                         EMIT(0x48, 0xF7, 0xF9);
                         if (op == OP_MOD) EMIT(0x48, 0x89, 0xD0);
                         break;
+                    case OP_BOR:
+                        if (!v) break;
+                        if (v >= -2147483648LL && v <= 2147483647LL) { EMIT(0x48, 0x0D); emit_imm(v, 4); }
+                        else { EMIT(0x48, 0xB9); emit_imm(v, 8); EMIT(0x48, 0x09, 0xC8); }
+                        break;
+                    case OP_BAND:
+                        if (v >= -2147483648LL && v <= 2147483647LL) { EMIT(0x48, 0x25); emit_imm(v, 4); }
+                        else { EMIT(0x48, 0xB9); emit_imm(v, 8); EMIT(0x48, 0x21, 0xC8); }
+                        break;
+                    case OP_BXOR:
+                        if (!v) break;
+                        if (v >= -2147483648LL && v <= 2147483647LL) { EMIT(0x48, 0x35); emit_imm(v, 4); }
+                        else { EMIT(0x48, 0xB9); emit_imm(v, 8); EMIT(0x48, 0x31, 0xC8); }
+                        break;
+                    case OP_SHL:
+                        EMIT(0x48, 0xC1, 0xE0, (uint8_t)(v & 63)); break;
+                    case OP_SHR:
+                        EMIT(0x48, 0xC1, 0xF8, (uint8_t)(v & 63)); break;
                     default:
                         emit_cmp_rax_imm(v);
                         EMIT(0x0F, setcc_of(op), 0xC0);
@@ -1180,6 +1235,8 @@ static void gen_stmt(ASTNode *n) {
         }
         case NODE_WHILE: {
             int lab_start = new_label(), lab_end = new_label();
+            if (nloop >= 64) die("loops too deep", n->line);
+            brk_lab[nloop] = lab_end; cont_lab[nloop] = lab_start; nloop++;
             put_label(lab_start);
             emit_jcc(gen_cond(n->data.while_node.cond), lab_end);
             int sn = nloc, so = cur_off;
@@ -1187,8 +1244,17 @@ static void gen_stmt(ASTNode *n) {
             nloc = sn; cur_off = so;
             emit_jmp(lab_start);
             put_label(lab_end);
+            nloop--;
             break;
         }
+        case NODE_BREAK:
+            if (!nloop) die("break outside loop", n->line);
+            emit_jmp(brk_lab[nloop - 1]);
+            break;
+        case NODE_CONTINUE:
+            if (!nloop) die("continue outside loop", n->line);
+            emit_jmp(cont_lab[nloop - 1]);
+            break;
         case NODE_RETURN:
             gen_expr(n->data.return_node.value);
             EMIT(0xC9, 0xC3);                  
@@ -1245,7 +1311,7 @@ static void scan_node(ASTNode *n, int w) {
             break;
         }
         case NODE_NUMBER: case NODE_STR: case NODE_SIZEOF: break;   
-        case NODE_NOT: case NODE_DEREF:
+        case NODE_NOT: case NODE_DEREF: case NODE_BNOT:
             scan_node(n->data.unary.value, w);
             break;
         case NODE_BINARY:
