@@ -9,12 +9,6 @@
 #ifdef _WIN32
 #include <io.h>
 #define O_BINARY _O_BINARY
-static char *strndup(const char *s, size_t n) {
-    char *p = malloc(n + 1);
-    memcpy(p, s, n);
-    p[n] = 0;
-    return p;
-}
 typedef struct {
     uint8_t e_ident[16];
     uint16_t e_type, e_machine;
@@ -43,6 +37,25 @@ static void die(const char *msg, int line) {
     fprintf(stderr, "error (line %d): %s\n", line, msg);
     exit(1);
 }
+
+#define STR_CAP (1 << 20)
+static char STR[STR_CAP];
+static int stroff;
+static char *str_put(const char *s, int len) {
+    if (stroff + len + 1 > STR_CAP) die("source too large", 0);
+    char *p = STR + stroff;
+    stroff += len + 1;
+    memcpy(p, s, len);
+    p[len] = 0;
+    return p;
+}
+
+static unsigned sfnv(const char *s) {
+    unsigned h = 2166136261u;
+    while (*s) { h ^= (unsigned char)*s++; h *= 16777619u; }
+    return h;
+}
+#define HSZ 128   
 
 #define PUSH(arr, n, cap, item) do {                                     \
     if ((n) >= (cap)) {                                                  \
@@ -73,7 +86,7 @@ typedef struct { TokenType type; char *text; int line; } Token;
 typedef struct { const char *src; int pos, line; } Lexer;
 
 static Token tok(TokenType t, const char *s, int len, int line) {
-    Token tk = { t, strndup(s, len), line };
+    Token tk = { t, str_put(s, len), line };
     return tk;
 }
 
@@ -164,7 +177,7 @@ static Token next_token(Lexer *lx) {
         unsigned u = (unsigned)ch;
         do { buf[n++] = (char)('0' + u % 10); u /= 10; } while (u);
         for (int i = 0; i < n; i++) rev[i] = buf[n - 1 - i];
-        Token tk = { TOK_NUMBER, strndup(rev, (size_t)n), line };
+        Token tk = { TOK_NUMBER, str_put(rev, n), line };
         return tk;
     }
     if (c == '&' && lx->src[s + 1] == '&') {
@@ -244,8 +257,13 @@ typedef struct ASTNode {
     } data;
 } ASTNode;
 
+#define NODE_CAP (1 << 18)
+static ASTNode NODE_ARENA[NODE_CAP];
+static int nodeoff;
 static ASTNode *node(NodeType t, int line) {
-    ASTNode *n = calloc(1, sizeof *n);
+    if (nodeoff >= NODE_CAP) die("too many AST nodes", 0);
+    ASTNode *n = &NODE_ARENA[nodeoff++];
+    memset(n, 0, sizeof *n);
     n->type = t; n->line = line;
     return n;
 }
@@ -360,12 +378,12 @@ static ASTNode *parse_primary(Parser *p) {
         adv(p);
         if (p->cur.type != TOK_LPAREN) {
             ASTNode *n = node(NODE_VARIABLE, t.line);
-            n->data.variable.name = strdup(t.text);
+            n->data.variable.name = t.text;
             return n;
         }
         adv(p);
         ASTNode *n = node(NODE_CALL, t.line);
-        n->data.call.name = strdup(t.text);
+        n->data.call.name = t.text;
         ASTNode **args = NULL;
         int ac = 0, acap = 0;
         if (p->cur.type != TOK_RPAREN)
@@ -495,7 +513,7 @@ static ASTNode *parse_statement(Parser *p) {
             adv(p);
             if (p->cur.type != TOK_IDENTIFIER) die("expected const name", p->cur.line);
             if (nconst >= (int)(sizeof CONSTS / sizeof *CONSTS)) die("too many consts", p->cur.line);
-            CONSTS[nconst].name = strdup(p->cur.text);
+            CONSTS[nconst].name = p->cur.text;
             adv(p);
             expect(p, TOK_ASSIGN, "expected '=' in const");
             long v = 0;
@@ -515,7 +533,7 @@ static ASTNode *parse_statement(Parser *p) {
             if (p->cur.type == TOK_INT || p->cur.type == TOK_CHAR) ty = parse_type(p);
             if (p->cur.type != TOK_IDENTIFIER) die("expected var name", p->cur.line);
             ASTNode *n = node(NODE_LET, t.line);
-            n->data.let.name = strdup(p->cur.text);
+            n->data.let.name = p->cur.text;
             n->data.let.ty = ty;
             adv(p);
             while (p->cur.type == TOK_LBRACKET) {
@@ -580,7 +598,7 @@ static ASTNode *parse_statement(Parser *p) {
                 adv(p);
                 if (p->cur.type != TOK_IDENTIFIER) die("expected extern func name", p->cur.line);
                 ASTNode *n = node(NODE_EXTERN_FUNC, t.line);
-                n->data.extfn.name = strdup(p->cur.text);
+                n->data.extfn.name = p->cur.text;
                 adv(p);
                 expect(p, TOK_LPAREN, "expected '('");
                 int pc = 0;
@@ -599,7 +617,7 @@ static ASTNode *parse_statement(Parser *p) {
                 adv(p);
                 if (p->cur.type != TOK_IDENTIFIER) die("expected extern let name", p->cur.line);
                 ASTNode *n = node(NODE_EXTERN_GLOB, t.line);
-                n->data.extgl.name = strdup(p->cur.text);
+                n->data.extgl.name = p->cur.text;
                 adv(p);
                 expect(p, TOK_SEMICOLON, "expected ';'");
                 return n;
@@ -622,7 +640,7 @@ static ASTNode *parse_function(Parser *p) {
     adv(p);
     if (p->cur.type != TOK_IDENTIFIER) die("expected func name", p->cur.line);
     ASTNode *f = node(NODE_FUNCTION, line);
-    f->data.function.name = strdup(p->cur.text);
+    f->data.function.name = p->cur.text;
     adv(p);
     expect(p, TOK_LPAREN, "expected '('");
     char **params = NULL;
@@ -630,7 +648,7 @@ static ASTNode *parse_function(Parser *p) {
     if (p->cur.type != TOK_RPAREN)
         do {
             if (p->cur.type != TOK_IDENTIFIER) die("expected param name", p->cur.line);
-            PUSH(params, pc, pcap, strdup(p->cur.text));
+            PUSH(params, pc, pcap, p->cur.text);
             adv(p);
         } while (p->cur.type == TOK_COMMA && (adv(p), 1));
     expect(p, TOK_RPAREN, "expected ')'");
@@ -654,7 +672,7 @@ static void parse_directive(Parser *p) {
     int line = p->cur.line;
     adv(p);
     if (p->cur.type != TOK_IDENTIFIER) die("directive name expected", line);
-    char *d = strdup(p->cur.text);
+    char *d = p->cur.text;
     adv(p);
     if (!strcmp(d, "base")) {
         if (p->cur.type != TOK_NUMBER) die("@base needs a number", line);
@@ -662,7 +680,7 @@ static void parse_directive(Parser *p) {
         adv(p);
     } else if (!strcmp(d, "entry")) {
         if (p->cur.type != TOK_IDENTIFIER) die("@entry needs a symbol", line);
-        entry_name = strdup(p->cur.text);
+        entry_name = p->cur.text;
         adv(p);
     } else if (!strcmp(d, "bin")) fmt = FMT_BIN;
     else if (!strcmp(d, "elf")) fmt = FMT_ELF;
@@ -813,10 +831,15 @@ static void emit_call_iat(int slot) {
 typedef struct { char *name; Type *ty; int off; int reg; } Glob;
 static Glob GLOB[256];
 static int nglob, gsize;
+static int GH[HSZ], GN[256];
 static Glob *glob_find(const char *name) {
-    for (int i = 0; i < nglob; i++)
+    for (int i = GH[sfnv(name) & (HSZ - 1)]; i >= 0; i = GN[i])
         if (!strcmp(GLOB[i].name, name)) return &GLOB[i];
     return NULL;
+}
+static void glob_hash_build(void) {
+    for (int i = 0; i < HSZ; i++) GH[i] = -1;
+    for (int i = nglob - 1; i >= 0; i--) { int h = sfnv(GLOB[i].name) & (HSZ - 1); GN[i] = GH[h]; GH[h] = i; }
 }
 
 static void greg_load_rax(int r) { EMIT((uint8_t)(0x48 | (r >= 8)), 0x8B, (uint8_t)(0xC0 | (r & 7))); }          /* mov rax,rN */
@@ -849,7 +872,7 @@ static Loc *loc_add(const char *name, Type *ty) {
     if (nloc >= (int)(sizeof LOCS / sizeof *LOCS)) die("too many locals", 0);
     cur_off -= ty_size(ty);
     if (cur_off < frame_min) frame_min = cur_off;
-    LOCS[nloc] = (Loc){ strdup(name), ty, cur_off };
+    LOCS[nloc] = (Loc){ (char *)name, ty, cur_off };
     return &LOCS[nloc++];
 }
 static Loc *loc_find(const char *name) {
@@ -861,10 +884,15 @@ static Loc *loc_find(const char *name) {
 static struct { char *name; int lab, params; } FNS[256];
 static int nfn;
 static int brk_lab[64], cont_lab[64], nloop;
+static int FH[HSZ], FX[256];
 static int fn_find(const char *name) {
-    for (int i = 0; i < nfn; i++)
+    for (int i = FH[sfnv(name) & (HSZ - 1)]; i >= 0; i = FX[i])
         if (!strcmp(FNS[i].name, name)) return i;
     return -1;
+}
+static void fn_hash_build(void) {
+    for (int i = 0; i < HSZ; i++) FH[i] = -1;
+    for (int i = nfn - 1; i >= 0; i--) { int h = sfnv(FNS[i].name) & (HSZ - 1); FX[i] = FH[h]; FH[h] = i; }
 }
 
 static int setcc_of(BinOp op) {
@@ -1710,6 +1738,8 @@ static void emit_entry(ASTNode *root) {
 static void generate_code(ASTNode *root) {
     bin_fmt = (fmt == FMT_BIN);
     clen = 0;
+    glob_hash_build();
+    fn_hash_build();
     if (raw_mode) {
         litlab = new_label();
         for (int i = 0; i < root->data.block.count; i++) {
@@ -1739,9 +1769,11 @@ static void generate_code(ASTNode *root) {
         ASTNode *f = root->data.block.stmts[i];
         if (f->type != NODE_FUNCTION) continue;
         if (nfn >= (int)(sizeof FNS / sizeof *FNS)) die("too many functions", f->line);
-        FNS[nfn] = (typeof(FNS[0])){ strdup(f->data.function.name), new_label(), f->data.function.pcount };
+        FNS[nfn] = (typeof(FNS[0])){ f->data.function.name, new_label(), f->data.function.pcount };
         nfn++;
     }
+    glob_hash_build();
+    fn_hash_build();
     for (int i = 0; i < root->data.block.count; i++) {
         ASTNode *n = root->data.block.stmts[i];
         if (n->type == NODE_EXTERN_FUNC) {
