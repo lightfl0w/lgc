@@ -49,6 +49,7 @@ const T_STAREQ = 47;
 const T_SLASHEQ = 48;
 const T_MODEQ = 49;
 const T_PERCENT = 50;
+const T_AT = 51;
 
 const N_NUM = 1;
 const N_VAR = 2;
@@ -116,10 +117,10 @@ let char SRC[65536]; let int NSRC;
 let char OUT[131072]; let int EP;
 let char STR[4096]; let int NSTR;
 let char NAM[8192]; let int NNAM;
-let int TKT[16384]; let int TVL[16384]; let int TLN[16384]; let int NTOK;
+let int TKT[32768]; let int TVL[32768]; let int TLN[32768]; let int NTOK;
 let int NTY[16384]; let int NAA[16384]; let int NBB[16384]; let int NVV[16384]; let int NNX[16384]; let int NND;
 let int VRN[512]; let int VTY[512]; let int VOF[512]; let int NVAR;
-let int FRN[128]; let int FLB[128]; let int FRP[128]; let int NFN;
+let int FRN[256]; let int FLB[256]; let int FRP[256]; let int NFN;
 let int GRN[256]; let int GTY[256]; let int GOF[256]; let int NGLB; let int GSZ;
 let int LBP[2048]; let int NLAB;
 let int PTP[8192]; let int PTV[8192]; let int PTG[8192]; let int NPT;
@@ -130,59 +131,72 @@ let int PST; let int LN; let int SRCI; let int CUROFF;
 let int LITLAB; let int PRINTL; let int ENTRY; let int ROOT; let int SYSP; let int CNAME; let int A1N; let int A2N;
 let int HDR; let int SEG2;
 let int T1; let int T2; let int CH; let int NX; let int FD; let char* OUTN;
-let char* argv1; let char* argv2;
+let char* argv1; let char* argv2; let char* argv3; let char* argv4;
+let char* argv5; let char* argv6; let char* argv7; let char* argv8;
+let int FMT; let int LOADBASE; let int ENTN; let int FREE;
+let int SRCARG; let int OUTARG;
+let int AVN[8]; let char NB[8];
+let int DBN; let int DEN; let int DBIN; let int DELF; let int DNORT;
+let int ASMN; let int CLIN; let int STIN; let int HLTN; let int IRQN;
+let int LGDN; let int LIDN; let int CR3N; let int INBN; let int INLN; let int OUTBN; let int OUTLN;
+let int RAW; let int DRAWN;
+let int BOOT; let int DBOOT;
+let int BW[67];
+let int RINM[32]; let int RIA[32];
+let int RLAB[64]; let int RLOK[64];
+let int RPP[128]; let int RPK[128]; let int RPI[128]; let int NRPT;
 
 
 func mod(a, b) { return a - a / b * b; }
 
 func strlen(p) {
-  let int n = 0;
-  while (*p) { n = n + 1; p = p + 1; }
-  return n;
+    let int n = 0;
+    while (mod(*p, 256)) { n = n + 1; p = p + 1; }
+    return n;
 }
 
 func die(ln, msg) {
-  print ln;
-  syscall(SYS_WRITE, 1, msg, strlen(msg));
-  syscall(SYS_EXIT, 1, 0, 0);
+    print ln;
+    syscall(SYS_WRITE, 1, msg, strlen(msg));
+    syscall(SYS_EXIT, 1, 0, 0);
 }
 
 func intern(p) {
-  let int k = 0;
-  let int o = 0;
-  let int q = 0;
-  while (k < NNAM) {
+    let int k = 0;
+    let int o = 0;
+    let int q = 0;
+    while (k < NNAM) {
+        q = p;
+        o = k;
+        while (NAM[o] && (NAM[o] == mod(*q, 256))) { o = o + 1; q = q + 1; }
+        if ((NAM[o] == 0) && (mod(*q, 256) == 0)) return k;
+        while (NAM[k]) k = k + 1;
+        k = k + 1;
+    }
+    if (NNAM > 8000) die(0, "name overflow");
+    o = NNAM;
     q = p;
-    o = k;
-    while (NAM[o] && (NAM[o] == mod(*q, 256))) { o = o + 1; q = q + 1; }
-    if ((NAM[o] == 0) && (mod(*q, 256) == 0)) return k;
-    while (NAM[k]) k = k + 1;
-    k = k + 1;
-  }
-  if (NNAM > 8000) die(0, "name overflow");
-  o = NNAM;
-  q = p;
-  while (mod(*q, 256)) { NAM[NNAM] = *q; NNAM = NNAM + 1; q = q + 1; }
-  NAM[NNAM] = 0; NNAM = NNAM + 1;
-  return o;
+    while (mod(*q, 256)) { NAM[NNAM] = *q; NNAM = NNAM + 1; q = q + 1; }
+    NAM[NNAM] = 0; NNAM = NNAM + 1;
+    return o;
 }
 
 func internspan(s, e) {
-  let int k = 0;
-  let int o = 0;
-  let int j = 0;
-  while (k < NNAM) {
-    j = s;
-    o = k;
-    while ((j < e) && (NAM[o] == SRC[j])) { o = o + 1; j = j + 1; }
-    if ((j == e) && (NAM[o] == 0)) return k;
-    while (NAM[k]) k = k + 1;
-    k = k + 1;
-  }
-  o = NNAM;
-  while (s < e) { NAM[NNAM] = SRC[s]; NNAM = NNAM + 1; s = s + 1; }
-  NAM[NNAM] = 0; NNAM = NNAM + 1;
-  return o;
+    let int k = 0;
+    let int o = 0;
+    let int j = 0;
+    while (k < NNAM) {
+        j = s;
+        o = k;
+        while ((j < e) && (NAM[o] == SRC[j])) { o = o + 1; j = j + 1; }
+        if ((j == e) && (NAM[o] == 0)) return k;
+        while (NAM[k]) k = k + 1;
+        k = k + 1;
+    }
+    o = NNAM;
+    while (s < e) { NAM[NNAM] = SRC[s]; NNAM = NNAM + 1; s = s + 1; }
+    NAM[NNAM] = 0; NNAM = NNAM + 1;
+    return o;
 }
 
 func alpha(c) { return ((c >= 'A') && (c <= 'Z')) || ((c >= 'a') && (c <= 'z')) || (c == '_'); }
@@ -190,142 +204,181 @@ func digit(c) { return (c >= '0') && (c <= '9'); }
 func xdig(c)  { return digit(c) || ((c >= 'a') && (c <= 'f')) || ((c >= 'A') && (c <= 'F')); }
 
 func hexnum() {
-  let int v = 0;
-  let int c = 0;
-  while (xdig(SRC[SRCI])) {
-    c = SRC[SRCI];
-    if (c < 58) v = v * 16 + c - '0';
-    else { if (c < 71) v = v * 16 + c - 55; else v = v * 16 + c - 87; }
-    SRCI = SRCI + 1;
-  }
-  return v;
+    let int v = 0;
+    let int c = 0;
+    while (xdig(SRC[SRCI])) {
+        c = SRC[SRCI];
+        if (c < 58) v = v * 16 + c - '0';
+        else { if (c < 71) v = v * 16 + c - 55; else v = v * 16 + c - 87; }
+        SRCI = SRCI + 1;
+    }
+    return v;
+}
+
+func pchr(p, i) { return mod(*(p + i), 256); }
+
+func scmp(p, q) {
+    let int i = 0;
+    while ((pchr(p, i) != 0) && (pchr(p, i) == pchr(q, i))) i = i + 1;
+    return pchr(p, i) == pchr(q, i);
+}
+
+func numstr(p) {
+    let int v = 0;
+    let int i = 0;
+    let int c = 0;
+    let int hx = 0;
+    if ((pchr(p, 0) == 48) && ((pchr(p, 1) == 120) || (pchr(p, 1) == 88))) { i = 2; hx = 1; }
+    c = pchr(p, i);
+    while (c) {
+        if (hx) {
+            if (c < 58) v = v * 16 + c - 48;
+            else if (c < 71) v = v * 16 + c - 55;
+            else v = v * 16 + c - 87;
+        } else v = v * 10 + c - 48;
+        i = i + 1;
+        c = pchr(p, i);
+    }
+    return v;
+}
+
+func argi(i) {
+    if (i == 0) return argv1;
+    if (i == 1) return argv2;
+    if (i == 2) return argv3;
+    if (i == 3) return argv4;
+    if (i == 4) return argv5;
+    if (i == 5) return argv6;
+    if (i == 6) return argv7;
+    if (i == 7) return argv8;
+    return 0;
 }
 
 func spmatch(s, e, k) {
-  while (s < e) {
-    if (SRC[s] != NAM[k]) return 0;
-    s = s + 1; k = k + 1;
-  }
-  return NAM[k] == 0;
+    while (s < e) {
+        if (SRC[s] != NAM[k]) return 0;
+        s = s + 1; k = k + 1;
+    }
+    return NAM[k] == 0;
 }
 
 func addtok(t, v) {
-  if (NTOK >= 16384) die(0, "token overflow");
-  TKT[NTOK] = t; TVL[NTOK] = v; TLN[NTOK] = LN; NTOK = NTOK + 1;
+    if (NTOK >= 32768) die(0, "token overflow");
+    TKT[NTOK] = t; TVL[NTOK] = v; TLN[NTOK] = LN; NTOK = NTOK + 1;
 }
 
 
 func lexone() {
-  let int c = SRC[SRCI];
-  let int s = SRCI;
-  let int t = 0;
-  let int v = 0;
-  let int k = 0;
-  if (c == '\n') LN = LN + 1;
-  if ((c == ' ') || (c == '\t') || (c == 13) || (c == '\n')) { SRCI = SRCI + 1; return 0; }
-  if ((c == '/') && (SRC[SRCI + 1] == '/')) {
-    SRCI = SRCI + 2;
-    while (SRC[SRCI] && (SRC[SRCI] != '\n')) SRCI = SRCI + 1;
-    return 0;
-  }
-  if (alpha(c)) {
-    SRCI = SRCI + 1;
-    while ((SRCI < NSRC) && (alpha(SRC[SRCI]) || digit(SRC[SRCI]))) SRCI = SRCI + 1;
-    t = T_IDENT;
-    while (k < 12) {
-      if (spmatch(s, SRCI, KWT[k])) t = k + 1;
-      k = k + 1;
+    let int c = SRC[SRCI];
+    let int s = SRCI;
+    let int t = 0;
+    let int v = 0;
+    let int k = 0;
+    if (c == '\n') LN = LN + 1;
+    if ((c == ' ') || (c == '\t') || (c == 13) || (c == '\n')) { SRCI = SRCI + 1; return 0; }
+    if ((c == '/') && (SRC[SRCI + 1] == '/')) {
+        SRCI = SRCI + 2;
+        while (SRC[SRCI] && (SRC[SRCI] != '\n')) SRCI = SRCI + 1;
+        return 0;
     }
-    if ((t == T_IDENT) && spmatch(s, SRCI, CNAME)) t = T_CONST;
-    if (t == T_IDENT) v = internspan(s, SRCI);
-    addtok(t, v);
-    return 0;
-  }
-  if (digit(c)) {
-    if ((c == '0') && (SRC[SRCI + 1] == 'x')) { SRCI = SRCI + 2; addtok(T_NUM, hexnum()); return 0; }
-    while (digit(SRC[SRCI])) { v = v * 10 + SRC[SRCI] - '0'; SRCI = SRCI + 1; }
-    addtok(T_NUM, v);
-    return 0;
-  }
-  if (c == '\'') {
-    SRCI = SRCI + 1;
-    CH = SRC[SRCI];
-    if (CH == 92) {
-      SRCI = SRCI + 1;
-      CH = SRC[SRCI];
-      if (CH == 110) CH = 10;
-      if (CH == 116) CH = 9;
-      if (CH == 48) CH = 0;
+    if (alpha(c)) {
+        SRCI = SRCI + 1;
+        while ((SRCI < NSRC) && (alpha(SRC[SRCI]) || digit(SRC[SRCI]))) SRCI = SRCI + 1;
+        t = T_IDENT;
+        while (k < 12) {
+            if (spmatch(s, SRCI, KWT[k])) t = k + 1;
+            k = k + 1;
+        }
+        if ((t == T_IDENT) && spmatch(s, SRCI, CNAME)) t = T_CONST;
+        if (t == T_IDENT) v = internspan(s, SRCI);
+        addtok(t, v);
+        return 0;
     }
-    SRCI = SRCI + 1;
-    if (SRC[SRCI] == '\'') SRCI = SRCI + 1;
-    addtok(T_NUM, CH);
-    return 0;
-  }
-  if (c == '"') {
-    SRCI = SRCI + 1;
-    v = NSTR;
-    while (SRC[SRCI] && (SRC[SRCI] != '"')) {
-      CH = SRC[SRCI];
-      if (CH == 92) {
+    if (digit(c)) {
+        if ((c == '0') && (SRC[SRCI + 1] == 'x')) { SRCI = SRCI + 2; addtok(T_NUM, hexnum()); return 0; }
+        while (digit(SRC[SRCI])) { v = v * 10 + SRC[SRCI] - '0'; SRCI = SRCI + 1; }
+        addtok(T_NUM, v);
+        return 0;
+    }
+    if (c == '\'') {
         SRCI = SRCI + 1;
         CH = SRC[SRCI];
-        if (CH == 110) CH = 10;
-        if (CH == 116) CH = 9;
-      }
-      STR[NSTR] = CH; NSTR = NSTR + 1;
-      SRCI = SRCI + 1;
+        if (CH == 92) {
+            SRCI = SRCI + 1;
+            CH = SRC[SRCI];
+            if (CH == 110) CH = 10;
+            if (CH == 116) CH = 9;
+            if (CH == 48) CH = 0;
+        }
+        SRCI = SRCI + 1;
+        if (SRC[SRCI] == '\'') SRCI = SRCI + 1;
+        addtok(T_NUM, CH);
+        return 0;
     }
-    STR[NSTR] = 0; NSTR = NSTR + 1;
+    if (c == '"') {
+        SRCI = SRCI + 1;
+        v = NSTR;
+        while (SRC[SRCI] && (SRC[SRCI] != '"')) {
+            CH = SRC[SRCI];
+            if (CH == 92) {
+                SRCI = SRCI + 1;
+                CH = SRC[SRCI];
+                if (CH == 110) CH = 10;
+                if (CH == 116) CH = 9;
+            }
+            STR[NSTR] = CH; NSTR = NSTR + 1;
+            SRCI = SRCI + 1;
+        }
+        STR[NSTR] = 0; NSTR = NSTR + 1;
+        SRCI = SRCI + 1;
+        addtok(T_STR, v);
+        return 0;
+    }
+    if (c > 127) die(LN, "bad character");
+    if ((c == '&') && (SRC[SRCI + 1] == '&')) { addtok(T_ANDAND, 0); SRCI = SRCI + 2; return 0; }
+    if ((c == '|') && (SRC[SRCI + 1] == '|')) { addtok(T_OROR, 0); SRCI = SRCI + 2; return 0; }
+    if (((c == '<') || (c == '>')) && (SRC[SRCI + 1] == c)) {
+        if (c == '<') addtok(T_SHL, 0); else addtok(T_SHR, 0);
+        SRCI = SRCI + 2;
+        return 0;
+    }
+    NX = SRC[SRCI + 1] == '=';
+    if (NX && P2[c]) { addtok(P2[c], 0); SRCI = SRCI + 2; return 0; }
+    t = P1[c];
+    if (t == 0) die(LN, "bad character");
+    addtok(t, 0);
     SRCI = SRCI + 1;
-    addtok(T_STR, v);
     return 0;
-  }
-  if (c > 127) die(LN, "bad character");
-  if ((c == '&') && (SRC[SRCI + 1] == '&')) { addtok(T_ANDAND, 0); SRCI = SRCI + 2; return 0; }
-  if ((c == '|') && (SRC[SRCI + 1] == '|')) { addtok(T_OROR, 0); SRCI = SRCI + 2; return 0; }
-  if (((c == '<') || (c == '>')) && (SRC[SRCI + 1] == c)) {
-    if (c == '<') addtok(T_SHL, 0); else addtok(T_SHR, 0);
-    SRCI = SRCI + 2;
-    return 0;
-  }
-  NX = SRC[SRCI + 1] == '=';
-  if (NX && P2[c]) { addtok(P2[c], 0); SRCI = SRCI + 2; return 0; }
-  t = P1[c];
-  if (t == 0) die(LN, "bad character");
-  addtok(t, 0);
-  SRCI = SRCI + 1;
-  return 0;
 }
 
 func lex() {
-  LN = 1;
-  while (SRCI < NSRC) lexone();
-  addtok(T_EOF, 0);
+    LN = 1;
+    while (SRCI < NSRC) lexone();
+    addtok(T_EOF, 0);
 }
 
 
 func nd(t, a, b, v) {
-  if (NND >= 16384) die(0, "node overflow");
-  NTY[NND] = t; NAA[NND] = a; NBB[NND] = b; NVV[NND] = v;
-  NNX[NND] = 0;
-  NND = NND + 1;
-  return NND - 1;
+    if (NND >= 16384) die(0, "node overflow");
+    NTY[NND] = t; NAA[NND] = a; NBB[NND] = b; NVV[NND] = v;
+    NNX[NND] = 0;
+    NND = NND + 1;
+    return NND - 1;
 }
 
 func append(h, x) {
-  let int t = h;
-  if (h == 0) return x;
-  while (NNX[t]) t = NNX[t];
-  NNX[t] = x;
-  return h;
+    let int t = h;
+    if (h == 0) return x;
+    while (NNX[t]) t = NNX[t];
+    NNX[t] = x;
+    return h;
 }
 
 func tk() { return TKT[PST]; }
 
 func eat(t, msg) {
-  if (TKT[PST] != t) die(TLN[PST], msg);
-  PST = PST + 1;
+    if (TKT[PST] != t) die(TLN[PST], msg);
+    PST = PST + 1;
 }
 
 func esz(t) { return mod(t / W32, 256); }
@@ -336,321 +389,382 @@ func tptr(b) { return K_PTR + esz(b) * W32 + 8; }
 func tarr(n, b) { return K_ARR + tsz(b) * W32 + n * tsz(b); }
 
 func parse_type() {
-  T1 = TYI;
-  if (tk() == T_CHAR) { T1 = TYC; PST = PST + 1; }
-  else eat(T_INT, "type expected");
-  while (tk() == T_STAR) { PST = PST + 1; T1 = tptr(T1); }
-  while (tk() == T_LBR) {
-    PST = PST + 1;
-    eat(T_NUM, "array size");
-    T2 = TVL[PST - 1];
-    eat(T_RBR, "expected ]");
-    T1 = tarr(T2, T1);
-  }
-  return T1;
+    T1 = TYI;
+    if (tk() == T_CHAR) { T1 = TYC; PST = PST + 1; }
+    else eat(T_INT, "type expected");
+    while (tk() == T_STAR) { PST = PST + 1; T1 = tptr(T1); }
+    while (tk() == T_LBR) {
+        PST = PST + 1;
+        eat(T_NUM, "array size");
+        T2 = TVL[PST - 1];
+        eat(T_RBR, "expected ]");
+        T1 = tarr(T2, T1);
+    }
+    return T1;
 }
 
 func primary() {
-  let int a = 0;
-  let int b = 0;
-  let int c = 0;
-  let int k = 0;
-  if (tk() == T_NUM) { c = nd(N_NUM, 0, 0, TVL[PST]); PST = PST + 1; return c; }
-  if (tk() == T_IDENT) {
-    c = TVL[PST];
-    k = 0;
-    while (k < NCN) {
-      if (CNN[k] == c) { PST = PST + 1; return nd(N_NUM, 0, 0, CNV[k]); }
-      k = k + 1;
-    }
-    PST = PST + 1;
-    if (tk() != T_LP) return nd(N_VAR, 0, 0, c);
-    PST = PST + 1;
-    if (tk() != T_RP) {
-      b = exprn();
-      a = 1;
-      while (tk() == T_COMMA) {
+    let int a = 0;
+    let int b = 0;
+    let int c = 0;
+    let int k = 0;
+    if (tk() == T_NUM) { c = nd(N_NUM, 0, 0, TVL[PST]); PST = PST + 1; return c; }
+    if (tk() == T_IDENT) {
+        c = TVL[PST];
+        k = 0;
+        while (k < NCN) {
+            if (CNN[k] == c) { PST = PST + 1; return nd(N_NUM, 0, 0, CNV[k]); }
+            k = k + 1;
+        }
         PST = PST + 1;
-        b = append(b, exprn());
-        a = a + 1;
-      }
+        if (tk() != T_LP) return nd(N_VAR, 0, 0, c);
+        PST = PST + 1;
+        if (tk() != T_RP) {
+            b = exprn();
+            a = 1;
+            while (tk() == T_COMMA) {
+                PST = PST + 1;
+                b = append(b, exprn());
+                a = a + 1;
+            }
+        }
+        eat(T_RP, "expected )");
+        return nd(N_CALL, b, a, c);
     }
-    eat(T_RP, "expected )");
-    return nd(N_CALL, b, a, c);
-  }
-  if (tk() == T_STR) { c = nd(N_STR, 0, 0, TVL[PST]); PST = PST + 1; return c; }
-  if (tk() == T_LP) { PST = PST + 1; c = exprn(); eat(T_RP, "expected )"); return c; }
-  die(TLN[PST], "syntax error");
-  return 0;
+    if (tk() == T_STR) { c = nd(N_STR, 0, 0, TVL[PST]); PST = PST + 1; return c; }
+    if (tk() == T_LP) { PST = PST + 1; c = exprn(); eat(T_RP, "expected )"); return c; }
+    die(TLN[PST], "syntax error");
+    return 0;
 }
 
 func postfix() {
-  let int n = primary();
-  while (tk() == T_LBR) {
-    PST = PST + 1;
-    n = nd(N_IDX, n, exprn(), 0);
-    eat(T_RBR, "expected ]");
-  }
-  return n;
+    let int n = primary();
+    while (tk() == T_LBR) {
+        PST = PST + 1;
+        n = nd(N_IDX, n, exprn(), 0);
+        eat(T_RBR, "expected ]");
+    }
+    return n;
 }
 
 func unary() {
-  let int n = 0;
-  if (tk() == T_MINUS) { PST = PST + 1; n = nd(N_NUM, 0, 0, 0); return nd(N_BIN, n, unary(), O_SUB); }
-  if (tk() == T_NOT)  { PST = PST + 1; return nd(N_NOT, unary(), 0, 0); }
-  if (tk() == T_AMP)  { PST = PST + 1; return nd(N_ADDR, unary(), 0, 0); }
-  if (tk() == T_STAR) { PST = PST + 1; return nd(N_DEREF, unary(), 0, 0); }
-  if (tk() == T_SIZEOF) { PST = PST + 1; return nd(N_SIZEOF, unary(), 0, 0); }
-  if (tk() == T_TILDE) { PST = PST + 1; return nd(N_BNOT, unary(), 0, 0); }
-  return postfix();
+    let int n = 0;
+    if (tk() == T_MINUS) { PST = PST + 1; n = nd(N_NUM, 0, 0, 0); return nd(N_BIN, n, unary(), O_SUB); }
+    if (tk() == T_NOT)  { PST = PST + 1; return nd(N_NOT, unary(), 0, 0); }
+    if (tk() == T_AMP)  { PST = PST + 1; return nd(N_ADDR, unary(), 0, 0); }
+    if (tk() == T_STAR) { PST = PST + 1; return nd(N_DEREF, unary(), 0, 0); }
+    if (tk() == T_SIZEOF) { PST = PST + 1; return nd(N_SIZEOF, unary(), 0, 0); }
+    if (tk() == T_TILDE) { PST = PST + 1; return nd(N_BNOT, unary(), 0, 0); }
+    return postfix();
 }
 
 func bin(m) {
-  let int n = unary();
-  let int e = 0;
-  while (BINP[tk()] && (BINP[tk()] / 32 >= m)) {
-    e = BINP[tk()];
-    PST = PST + 1;
-    n = nd(N_BIN, n, bin(e / 32 + 1), e - e / 32 * 32);
-  }
-  return n;
+    let int n = unary();
+    let int e = 0;
+    while (BINP[tk()] && (BINP[tk()] / 32 >= m)) {
+        e = BINP[tk()];
+        PST = PST + 1;
+        n = nd(N_BIN, n, bin(e / 32 + 1), e - e / 32 * 32);
+    }
+    return n;
 }
 
 func exprn() {
-  let int n = bin(0);
-  let int c = 0;
-  if (tk() == T_ASSIGN) c = 1;
-  else if (tk() == T_PLUSEQ) c = O_ADD + 2;
-  else if (tk() == T_MINUSEQ) c = O_SUB + 2;
-  else if (tk() == T_STAREQ) c = O_MUL + 2;
-  else if (tk() == T_SLASHEQ) c = O_DIV + 2;
-  else if (tk() == T_MODEQ) c = O_MOD + 2;
-  if (c == 0) return n;
-  PST = PST + 1;
-  return nd(N_ASSIGN, n, exprn(), c - 1);
+    let int n = bin(0);
+    let int c = 0;
+    if (tk() == T_ASSIGN) c = 1;
+    else if (tk() == T_PLUSEQ) c = O_ADD + 2;
+    else if (tk() == T_MINUSEQ) c = O_SUB + 2;
+    else if (tk() == T_STAREQ) c = O_MUL + 2;
+    else if (tk() == T_SLASHEQ) c = O_DIV + 2;
+    else if (tk() == T_MODEQ) c = O_MOD + 2;
+    if (c == 0) return n;
+    PST = PST + 1;
+    return nd(N_ASSIGN, n, exprn(), c - 1);
 }
 
 func stmt() {
-  let int n = 0;
-  let int t = tk();
-  if (t == T_CONST) {
-    PST = PST + 1;
-    eat(T_IDENT, "const name");
-    CNN[NCN] = TVL[PST - 1];
-    eat(T_ASSIGN, "expected =");
-    eat(T_NUM, "const must be number");
-    CNV[NCN] = TVL[PST - 1];
-    NCN = NCN + 1;
-    eat(T_SEMI, "expected ;");
-    return nd(N_BLOCK, 0, 0, 0);
-  }
-  if (t == T_LET) {
-    PST = PST + 1;
-    n = nd(N_LET, 0, TYI, 0);
-    if ((tk() == T_INT) || (tk() == T_CHAR)) NBB[n] = parse_type();
-    eat(T_IDENT, "var name");
-    NVV[n] = TVL[PST - 1];
-    while (tk() == T_LBR) {
-      PST = PST + 1;
-      eat(T_NUM, "array size");
-      T2 = TVL[PST - 1];
-      eat(T_RBR, "expected ]");
-      NBB[n] = tarr(T2, NBB[n]);
+    let int n = 0;
+    let int t = tk();
+    if (t == T_CONST) {
+        PST = PST + 1;
+        eat(T_IDENT, "const name");
+        CNN[NCN] = TVL[PST - 1];
+        eat(T_ASSIGN, "expected =");
+        eat(T_NUM, "const must be number");
+        CNV[NCN] = TVL[PST - 1];
+        NCN = NCN + 1;
+        eat(T_SEMI, "expected ;");
+        return nd(N_BLOCK, 0, 0, 0);
     }
-    if (tk() == T_ASSIGN) { PST = PST + 1; NAA[n] = exprn(); }
+    if (t == T_LET) {
+        PST = PST + 1;
+        n = nd(N_LET, 0, TYI, 0);
+        if ((tk() == T_INT) || (tk() == T_CHAR)) NBB[n] = parse_type();
+        eat(T_IDENT, "var name");
+        NVV[n] = TVL[PST - 1];
+        while (tk() == T_LBR) {
+            PST = PST + 1;
+            eat(T_NUM, "array size");
+            T2 = TVL[PST - 1];
+            eat(T_RBR, "expected ]");
+            NBB[n] = tarr(T2, NBB[n]);
+        }
+        if (tk() == T_ASSIGN) { PST = PST + 1; NAA[n] = exprn(); }
+        eat(T_SEMI, "expected ;");
+        return n;
+    }
+    if (t == T_PRINT) { PST = PST + 1; n = nd(N_PRINT, exprn(), 0, 0); eat(T_SEMI, "expected ;"); return n; }
+    if (t == T_IF) {
+        PST = PST + 1;
+        eat(T_LP, "expected (");
+        n = nd(N_IF, exprn(), 0, 0);
+        eat(T_RP, "expected )");
+        NBB[n] = stmt();
+        if (tk() == T_ELSE) { PST = PST + 1; NVV[n] = stmt(); }
+        return n;
+    }
+    if (t == T_WHILE) {
+        PST = PST + 1;
+        eat(T_LP, "expected (");
+        n = nd(N_WHILE, exprn(), 0, 0);
+        eat(T_RP, "expected )");
+        NBB[n] = stmt();
+        return n;
+    }
+    if (t == T_BREAK) { PST = PST + 1; eat(T_SEMI, "expected ;"); return nd(N_BREAK, 0, 0, 0); }
+    if (t == T_CONTINUE) { PST = PST + 1; eat(T_SEMI, "expected ;"); return nd(N_CONTINUE, 0, 0, 0); }
+    if (t == T_RETURN) { PST = PST + 1; n = nd(N_RET, exprn(), 0, 0); eat(T_SEMI, "expected ;"); return n; }
+    if (t == T_LBRACE) {
+        PST = PST + 1;
+        n = 0;
+        while ((tk() != T_RBRACE) && (tk() != T_EOF)) n = append(n, stmt());
+        eat(T_RBRACE, "expected }");
+        return nd(N_BLOCK, n, 0, 0);
+    }
+    if (t == T_FUNC) die(TLN[PST], "func must be top-level");
+    n = exprn();
     eat(T_SEMI, "expected ;");
     return n;
-  }
-  if (t == T_PRINT) { PST = PST + 1; n = nd(N_PRINT, exprn(), 0, 0); eat(T_SEMI, "expected ;"); return n; }
-  if (t == T_IF) {
-    PST = PST + 1;
-    eat(T_LP, "expected (");
-    n = nd(N_IF, exprn(), 0, 0);
-    eat(T_RP, "expected )");
-    NBB[n] = stmt();
-    if (tk() == T_ELSE) { PST = PST + 1; NVV[n] = stmt(); }
-    return n;
-  }
-  if (t == T_WHILE) {
-    PST = PST + 1;
-    eat(T_LP, "expected (");
-    n = nd(N_WHILE, exprn(), 0, 0);
-    eat(T_RP, "expected )");
-    NBB[n] = stmt();
-    return n;
-  }
-  if (t == T_BREAK) { PST = PST + 1; eat(T_SEMI, "expected ;"); return nd(N_BREAK, 0, 0, 0); }
-  if (t == T_CONTINUE) { PST = PST + 1; eat(T_SEMI, "expected ;"); return nd(N_CONTINUE, 0, 0, 0); }
-  if (t == T_RETURN) { PST = PST + 1; n = nd(N_RET, exprn(), 0, 0); eat(T_SEMI, "expected ;"); return n; }
-  if (t == T_LBRACE) {
-    PST = PST + 1;
-    n = 0;
-    while ((tk() != T_RBRACE) && (tk() != T_EOF)) n = append(n, stmt());
-    eat(T_RBRACE, "expected }");
-    return nd(N_BLOCK, n, 0, 0);
-  }
-  if (t == T_FUNC) die(TLN[PST], "func must be top-level");
-  n = exprn();
-  eat(T_SEMI, "expected ;");
-  return n;
 }
 
 func fundef() {
-  let int n = 0;
-  let int pc = 0;
-  let int h = 0;
-  PST = PST + 1;
-  eat(T_IDENT, "func name");
-  n = nd(N_FUN, 0, 0, TVL[PST - 1]);
-  eat(T_LP, "expected (");
-  if (tk() != T_RP) {
-    eat(T_IDENT, "param name");
-    h = nd(N_VAR, 0, 0, TVL[PST - 1]);
-    pc = 1;
-    while (tk() == T_COMMA) {
-      PST = PST + 1;
-      eat(T_IDENT, "param name");
-      h = append(h, nd(N_VAR, 0, 0, TVL[PST - 1]));
-      pc = pc + 1;
+    let int n = 0;
+    let int pc = 0;
+    let int h = 0;
+    PST = PST + 1;
+    eat(T_IDENT, "func name");
+    n = nd(N_FUN, 0, 0, TVL[PST - 1]);
+    eat(T_LP, "expected (");
+    if (tk() != T_RP) {
+        eat(T_IDENT, "param name");
+        h = nd(N_VAR, 0, 0, TVL[PST - 1]);
+        pc = 1;
+        while (tk() == T_COMMA) {
+            PST = PST + 1;
+            eat(T_IDENT, "param name");
+            h = append(h, nd(N_VAR, 0, 0, TVL[PST - 1]));
+            pc = pc + 1;
+        }
     }
-  }
-  eat(T_RP, "expected )");
-  NAA[n] = h;
-  NBB[n] = stmt();
-  return n;
+    eat(T_RP, "expected )");
+    NAA[n] = h;
+    NBB[n] = stmt();
+    return n;
+}
+
+func directive() {
+    let int d = 0;
+    PST = PST + 1;
+    if (tk() != T_IDENT) die(TLN[PST], "directive name expected");
+    d = TVL[PST];
+    PST = PST + 1;
+    if (d == DBN) {
+        if (tk() != T_NUM) die(TLN[PST], "@base needs a number");
+        LOADBASE = TVL[PST];
+        PST = PST + 1;
+    } else if (d == DEN) {
+        if (tk() != T_IDENT) die(TLN[PST], "@entry needs a symbol");
+        ENTN = TVL[PST];
+        PST = PST + 1;
+    } else if (d == DBIN) FMT = 1;
+    else if (d == DELF) FMT = 0;
+    else if (d == DNORT) FREE = 1;
+    else if (d == DRAWN) RAW = 1;
+    else if (d == DBOOT) BOOT = 1;
+    else die(TLN[PST], "unknown directive");
+    eat(T_SEMI, "expected ; after directive");
+    return 0;
 }
 
 func program() {
-  let int h = 0;
-  while (tk() != T_EOF) {
-    if (tk() == T_FUNC) h = append(h, fundef());
-    else h = append(h, stmt());
-  }
-  return nd(N_BLOCK, h, 0, 0);
+    let int h = 0;
+    while (tk() != T_EOF) {
+        if (tk() == T_AT) directive();
+        else if (tk() == T_FUNC) h = append(h, fundef());
+        else h = append(h, stmt());
+    }
+    return nd(N_BLOCK, h, 0, 0);
 }
 
 
 func findloc(nm) {
-  let int i = NVAR - 1;
-  while (i >= 0) {
-    if (VRN[i] == nm) return i;
-    i = i - 1;
-  }
-  return -1;
+    let int i = NVAR - 1;
+    while (i >= 0) {
+        if (VRN[i] == nm) return i;
+        i = i - 1;
+    }
+    return -1;
 }
 
 func addloc(nm, t) {
-  if (NVAR >= 512) die(0, "local overflow");
-  CUROFF = CUROFF - tsz(t);
-  VRN[NVAR] = nm; VTY[NVAR] = t; VOF[NVAR] = CUROFF;
-  NVAR = NVAR + 1;
-  return NVAR - 1;
+    if (NVAR >= 512) die(0, "local overflow");
+    CUROFF = CUROFF - tsz(t);
+    VRN[NVAR] = nm; VTY[NVAR] = t; VOF[NVAR] = CUROFF;
+    NVAR = NVAR + 1;
+    return NVAR - 1;
 }
 
 func findglob(nm) {
-  let int i = 0;
-  while (i < NGLB) {
-    if (GRN[i] == nm) return i;
-    i = i + 1;
-  }
-  return -1;
+    let int i = 0;
+    while (i < NGLB) {
+        if (GRN[i] == nm) return i;
+        i = i + 1;
+    }
+    return -1;
 }
 
 func addglob(nm, t) {
-  if (NGLB >= 256) die(0, "glob overflow");
-  GRN[NGLB] = nm; GTY[NGLB] = t; GOF[NGLB] = GSZ;
-  GSZ = GSZ + tsz(t);
-  NGLB = NGLB + 1;
+    if (NGLB >= 256) die(0, "glob overflow");
+    GRN[NGLB] = nm; GTY[NGLB] = t; GOF[NGLB] = GSZ;
+    GSZ = GSZ + tsz(t);
+    NGLB = NGLB + 1;
 }
 
 func findfun(nm) {
-  let int i = 0;
-  while (i < NFN) {
-    if (FRN[i] == nm) return i;
-    i = i + 1;
-  }
-  return -1;
+    let int i = 0;
+    while (i < NFN) {
+        if (FRN[i] == nm) return i;
+        i = i + 1;
+    }
+    return -1;
 }
 
 func type_of(n) {
-  let int t = NTY[n];
-  let int i = 0;
-  if (t == N_VAR) {
-    i = findloc(NVV[n]);
-    if (i >= 0) return VTY[i];
-    i = findglob(NVV[n]);
-    if (i >= 0) return GTY[i];
-    return TYI;
-  }
-  if (t == N_STR) return tptr(TYC);
-  if (t == N_ADDR) return tptr(type_of(NAA[n]));
-  if ((t == N_DEREF) || (t == N_IDX)) {
-    t = type_of(NAA[n]);
-    if (kind(t) > 0) {
-      if (esz(t) == 1) return TYC;
-      return TYI;
+    let int t = NTY[n];
+    let int i = 0;
+    if (t == N_VAR) {
+        i = findloc(NVV[n]);
+        if (i >= 0) return VTY[i];
+        i = findglob(NVV[n]);
+        if (i >= 0) return GTY[i];
+        return TYI;
+    }
+    if (t == N_STR) return tptr(TYC);
+    if (t == N_ADDR) return tptr(type_of(NAA[n]));
+    if ((t == N_DEREF) || (t == N_IDX)) {
+        t = type_of(NAA[n]);
+        if (kind(t) > 0) {
+            if (esz(t) == 1) return TYC;
+            return TYI;
+        }
+        return TYI;
     }
     return TYI;
-  }
-  return TYI;
 }
 
 func szof(n) {
-  if (NTY[n] == N_VAR) return tsz(type_of(n));
-  return 8;
+    if (NTY[n] == N_VAR) return tsz(type_of(n));
+    return 8;
 }
 
 
 func e8(v) {
-  if (EP > CODE_MAX) die(0, "code overflow");
-  OUT[HDR + EP] = v;
-  EP = EP + 1;
+    if (EP > CODE_MAX) die(0, "code overflow");
+    OUT[HDR + EP] = v;
+    EP = EP + 1;
 }
 
 func e32v(v) { e8(v); e8(v / 256); e8(v / 65536); e8(v / 16777216); }
 func e32(v) {
-  if (v < 0) v = v + W32;
-  e32v(v);
+    if (v < 0) v = v + W32;
+    e32v(v);
 }
 func e64(v) { e32v(mod(v, W32)); e32v(v / W32); }
 
 func poke32(pos, v) {
-  if (v < 0) v = v + W32;
-  OUT[HDR + pos] = v;
-  OUT[HDR + 1 + pos] = v / 256;
-  OUT[HDR + 2 + pos] = v / 65536;
-  OUT[HDR + 3 + pos] = v / 16777216;
+    if (v < 0) v = v + W32;
+    OUT[HDR + pos] = v;
+    OUT[HDR + 1 + pos] = v / 256;
+    OUT[HDR + 2 + pos] = v / 65536;
+    OUT[HDR + 3 + pos] = v / 16777216;
 }
 
 func p16(o, v) { OUT[o] = v; OUT[o + 1] = v / 256; }
 func p32(o, v) { p16(o, v); p16(o + 2, v / 65536); }
 func p64(o, v) { p32(o, v); p32(o + 4, v / W32); }
 
+func rarg(a) {
+    if (NTY[a] != N_NUM) die(0, "intrinsic argument must be a constant");
+    return NVV[a];
+}
+
+func rdefer(k, id, pos) {
+    if (RAW == 0) die(0, "raw label intrinsics are only valid in @raw mode");
+    if (NRPT >= 128) die(0, "too many raw patches");
+    RPK[NRPT] = k; RPI[NRPT] = id; RPP[NRPT] = pos; NRPT = NRPT + 1;
+    return 0;
+}
+
+func rawapply() {
+    let int i = 0;
+    let int p = 0;
+    let int id = 0;
+    let int v = 0;
+    let int rel = 0;
+    while (i < NRPT) {
+        p = RPP[i]; id = RPI[i];
+        if ((id < 0) || (id >= 64) || (RLOK[id] == 0)) die(0, "undefined raw label");
+        if (RPK[i] == 0) {
+            rel = RLAB[id] - p - 1;
+            if (rel < -128) die(0, "raw branch out of range");
+            if (rel > 127) die(0, "raw branch out of range");
+            OUT[HDR + p] = rel;
+        } else {
+            v = 0x7C00 + RLAB[id];
+            if (RPK[i] == 1) { OUT[HDR + p] = v; OUT[HDR + p + 1] = v / 256; }
+            else poke32(p, v);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 func mri(v) {
-  if (v == 0) { e8(72); e8(49); e8(192); return 0; }
-  if ((v >= -128) && (v <= 127)) { e8(106); e8(v); e8(88); return 0; }
-  if ((v >= 0) && (v <= 4294967295)) { e8(184); e32(v); return 0; }
-  if ((v >= -2147483648) && (v <= -1)) { e8(72); e8(199); e32(v); return 0; }
-  e8(72); e8(184); e64(v);
-  return 0;
+    if (v == 0) { e8(72); e8(49); e8(192); return 0; }
+    if ((v >= -128) && (v <= 127)) { e8(106); e8(v); e8(88); return 0; }
+    if ((v >= 0) && (v <= 4294967295)) { e8(184); e32(v); return 0; }
+    if ((v >= -2147483648) && (v <= -1)) { e8(72); e8(199); e32(v); return 0; }
+    e8(72); e8(184); e64(v);
+    return 0;
 }
 
 func lab_new() {
-  if (NLAB >= 2048) die(0, "label overflow");
-  NLAB = NLAB + 1;
-  return NLAB - 1;
+    if (NLAB >= 2048) die(0, "label overflow");
+    NLAB = NLAB + 1;
+    return NLAB - 1;
 }
 func put_lab(l) { LBP[l] = EP; }
 func patch(k, v) {
-  if (NPT >= 8192) die(0, "patch overflow");
-  PTP[NPT] = EP; PTV[NPT] = v; PTG[NPT] = k;
-  NPT = NPT + 1;
-  EP = EP + 4;
+    if (NPT >= 8192) die(0, "patch overflow");
+    PTP[NPT] = EP; PTV[NPT] = v; PTG[NPT] = k;
+    NPT = NPT + 1;
+    EP = EP + 4;
 }
 
 func setcc(op) {
-  if (op < 6) return 144 + op;
-  return 156 + mod(10 - op, 4);
+    if (op < 6) return 144 + op;
+    return 156 + mod(10 - op, 4);
 }
 
 
@@ -678,11 +792,11 @@ func test_rax()        { e8(72); e8(133); e8(192); }
 func cmp_rax_rbx()     { e8(72); e8(57); e8(216); }
 func cmp_rax_rcx()     { e8(72); e8(57); e8(200); }
 func cmp_rax_imm(v) {
-  if ((v >= -128) && (v <= 127)) { e8(72); e8(131); e8(248); e8(v); return 0; }
-  if ((v >= -2147483648) && (v <= 2147483647)) { e8(72); e8(61); e32(v); return 0; }
-  e8(72); e8(185); e64(v);
-  e8(72); e8(57); e8(200);
-  return 0;
+    if ((v >= -128) && (v <= 127)) { e8(72); e8(131); e8(248); e8(v); return 0; }
+    if ((v >= -2147483648) && (v <= 2147483647)) { e8(72); e8(61); e32(v); return 0; }
+    e8(72); e8(185); e64(v);
+    e8(72); e8(57); e8(200);
+    return 0;
 }
 func add_rax_rcx()     { e8(72); e8(1); e8(200); }
 func sub_rax_rcx()     { e8(72); e8(41); e8(200); }
@@ -715,487 +829,787 @@ func pop_rdi_rsi_rdx() { e8(95); e8(94); e8(90); }
 func prologue()        { e8(85); e8(72); e8(137); e8(229); e8(72); e8(131); e8(236); e8(64); }
 
 
+func emit_cli()        { e8(250); }
+func emit_sti()        { e8(251); }
+func emit_hlt()        { e8(244); }
+func emit_iretq()      { e8(72); e8(207); }
+func emit_xor_eax()    { e8(49); e8(192); }
+func emit_lgdt()       { e8(15); e8(1); e8(16); }
+func emit_lidt()       { e8(15); e8(1); e8(24); }
+func emit_cr3()        { e8(15); e8(34); e8(216); }
+func emit_in_b()       { e8(236); e8(15); e8(182); e8(192); }
+func emit_in_l()       { e8(237); }
+func emit_out_b()      { e8(238); }
+func emit_out_l()      { e8(239); }
+func cmp_dx_imm(v)     { if ((v >= 0) && (v <= 65535)) { e8(102); e8(186); e8(v); e8(v / 256); return 0; } e8(187); e64(v); }
+
 func try_rcx(n) {
-  let int i = 0;
-  if (NTY[n] != N_VAR) return 0;
-  i = findloc(NVV[n]);
-  if (i >= 0) {
-    if (kind(VTY[i]) != 0) return 0;
-    if (ischar(VTY[i])) { e8(15); e8(182); e8(77); e8(VOF[i]); }
-    else { e8(72); e8(139); e8(77); e8(VOF[i]); }
+    let int i = 0;
+    if (NTY[n] != N_VAR) return 0;
+    i = findloc(NVV[n]);
+    if (i >= 0) {
+        if (kind(VTY[i]) != 0) return 0;
+        if (ischar(VTY[i])) { e8(15); e8(182); e8(77); e8(VOF[i]); }
+        else { e8(72); e8(139); e8(77); e8(VOF[i]); }
+        return 1;
+    }
+    i = findglob(NVV[n]);
+    if ((i < 0) || (kind(GTY[i]) != 0)) return 0;
+    if (ischar(GTY[i])) { e8(15); e8(182); e8(13); patch(2, GOF[i]); }
+    else { e8(72); e8(139); e8(13); patch(2, GOF[i]); }
     return 1;
-  }
-  i = findglob(NVV[n]);
-  if ((i < 0) || (kind(GTY[i]) != 0)) return 0;
-  if (ischar(GTY[i])) { e8(15); e8(182); e8(13); patch(2, GOF[i]); }
-  else { e8(72); e8(139); e8(13); patch(2, GOF[i]); }
-  return 1;
 }
 
 func gen_addr(n) {
-  let int i = 0;
-  if (NTY[n] == N_VAR) {
-    i = findloc(NVV[n]);
-    if (i >= 0) { lea_rbp(VOF[i]); return 0; }
-    i = findglob(NVV[n]);
-    if (i < 0) die(0, "undefined variable");
-    lea_rip_glob(GOF[i]);
+    let int i = 0;
+    if (NTY[n] == N_VAR) {
+        i = findloc(NVV[n]);
+        if (i >= 0) { lea_rbp(VOF[i]); return 0; }
+        i = findglob(NVV[n]);
+        if (i < 0) die(0, "undefined variable");
+        lea_rip_glob(GOF[i]);
+        return 0;
+    }
+    if (NTY[n] == N_DEREF) { gen_expr(NAA[n]); return 0; }
+    if (NTY[n] == N_IDX) {
+        if (kind(type_of(NAA[n])) == 1) gen_expr(NAA[n]);
+        else gen_addr(NAA[n]);
+        push_rax();
+        gen_expr(NBB[n]);
+        pop_rbx();
+        i = esz(type_of(NAA[n]));
+        if (i == 8) shl_rax_3();
+        else if (i != 1) { e8(72); e8(105); e8(192); e32(i); }
+        add_rbx_rax();
+        return 0;
+    }
+    die(0, "not addressable");
     return 0;
-  }
-  if (NTY[n] == N_DEREF) { gen_expr(NAA[n]); return 0; }
-  if (NTY[n] == N_IDX) {
-    if (kind(type_of(NAA[n])) == 1) gen_expr(NAA[n]);
-    else gen_addr(NAA[n]);
-    push_rax();
-    gen_expr(NBB[n]);
-    pop_rbx();
-    i = esz(type_of(NAA[n]));
-    if (i == 8) shl_rax_3();
-    else if (i != 1) { e8(72); e8(105); e8(192); e32(i); }
-    add_rbx_rax();
-    return 0;
-  }
-  die(0, "not addressable");
-  return 0;
 }
 
 func gen_expr(n) {
-  let int t = NTY[n];
-  let int i = 0;
-  let int j = 0;
-  let int k = 0;
-  if (t == N_NUM) { mri(NVV[n]); return 0; }
-  if (t == N_VAR) {
-    i = findloc(NVV[n]);
-    if (i >= 0) {
-      if (kind(VTY[i]) == 2) { lea_rbp(VOF[i]); return 0; }
-      if (ischar(VTY[i])) { loadz_rbp(VOF[i]); return 0; }
-      load_rbp(VOF[i]);
-      return 0;
+    let int t = NTY[n];
+    let int i = 0;
+    let int j = 0;
+    let int k = 0;
+    if (t == N_NUM) { mri(NVV[n]); return 0; }
+    if (t == N_VAR) {
+        i = findloc(NVV[n]);
+        if (i >= 0) {
+            if (kind(VTY[i]) == 2) { lea_rbp(VOF[i]); return 0; }
+            if (ischar(VTY[i])) { loadz_rbp(VOF[i]); return 0; }
+            load_rbp(VOF[i]);
+            return 0;
+        }
+        i = findglob(NVV[n]);
+        if (i >= 0) {
+            if (kind(GTY[i]) == 2) { lea_rip_glob(GOF[i]); return 0; }
+            if (ischar(GTY[i])) { loadz_glob(GOF[i]); return 0; }
+            load_glob(GOF[i]);
+            return 0;
+        }
+        die(0, "undefined variable");
     }
-    i = findglob(NVV[n]);
-    if (i >= 0) {
-      if (kind(GTY[i]) == 2) { lea_rip_glob(GOF[i]); return 0; }
-      if (ischar(GTY[i])) { loadz_glob(GOF[i]); return 0; }
-      load_glob(GOF[i]);
-      return 0;
-    }
-    die(0, "undefined variable");
-  }
-  if (t == N_STR)    { e8(72); e8(141); e8(5); patch(1, NVV[n]); return 0; }
-  if (t == N_ADDR)   { gen_addr(NAA[n]); return 0; }
-  if (t == N_DEREF) {
-    gen_expr(NAA[n]);
-    if (ischar(type_of(n))) { loadz_rax(); return 0; }
-    load_rax();
-    return 0;
-  }
-  if (t == N_IDX) {
-    gen_addr(n);
-    if (ischar(type_of(n))) { loadz_rax(); return 0; }
-    load_rax();
-    return 0;
-  }
-  if (t == N_NOT) { gen_expr(NAA[n]); test_rax(); setcc_al(O_EQ); return 0; }
-  if (t == N_BNOT) { gen_expr(NAA[n]); not_rax(); return 0; }
-  if (t == N_ASSIGN) {
-    i = NVV[n];
-    gen_addr(NAA[n]);
-    push_rax();
-    gen_expr(NBB[n]);
-    pop_rbx();
-    if (i) {
-      e8(72); e8(139); e8(11);
-      if (i == O_ADD + 1) { e8(72); e8(1); e8(200); }
-      if (i == O_SUB + 1) { e8(72); e8(145); e8(72); e8(41); e8(200); }
-      if (i == O_MUL + 1) { e8(72); e8(15); e8(175); e8(193);}
-      if ((i == O_DIV + 1) || (i == O_MOD + 1)) {
-        e8(72); e8(145);
-        e8(72); e8(153);
-        e8(72); e8(247); e8(249);
-      }
-      if (i == O_MOD + 1) { e8(72); e8(137); e8(208); }
-      store_rbx_q();
-      return 0;
-    }
-    if (ischar(type_of(NAA[n]))) { store_rbx_byte(); return 0; }
-    store_rbx_q();
-    return 0;
-  }
-  if (t == N_SIZEOF) { mri(szof(NAA[n])); return 0; }
-  if (t == N_BIN) {
-    i = NVV[n];
-    if ((i == O_AND) || (i == O_OR)) {
-      j = lab_new(); k = lab_new();
-      gen_expr(NAA[n]); test_rax();
-      if (i == O_AND) je_rel(j); else jne_rel(j);
-      gen_expr(NBB[n]); test_rax();
-      if (i == O_AND) je_rel(j); else jne_rel(j);
-      if (i == O_AND) mri(1); else { e8(72); e8(49); e8(192); }
-      jmp_rel(k);
-      put_lab(j);
-      if (i == O_AND) { e8(72); e8(49); e8(192); } else mri(1);
-      put_lab(k);
-      return 0;
-    }
-    if ((i >= O_EQ) && (i <= O_GE)) {
-      if (NTY[NBB[n]] == N_NUM) {
+    if (t == N_STR)    { e8(72); e8(141); e8(5); patch(1, NVV[n]); return 0; }
+    if (t == N_ADDR)   { gen_addr(NAA[n]); return 0; }
+    if (t == N_DEREF) {
         gen_expr(NAA[n]);
-        cmp_rax_imm(NVV[NBB[n]]);
-        setcc_al(i);
+        if (ischar(type_of(n))) { loadz_rax(); return 0; }
+        load_rax();
         return 0;
-      }
-      gen_expr(NAA[n]);
-      if (try_rcx(NBB[n])) { cmp_rax_rcx(); setcc_al(i); return 0; }
-      gen_expr(NBB[n]); push_rax();
-      gen_expr(NAA[n]); pop_rbx();
-      cmp_rax_rbx();
-      setcc_al(i);
-      return 0;
     }
-    gen_expr(NAA[n]);
-    if ((i <= O_MUL) && try_rcx(NBB[n])) {
-      if (i == O_ADD) { add_rax_rcx(); return 0; }
-      if (i == O_SUB) { sub_rax_rcx(); return 0; }
-      mul_rax_rcx();
-      return 0;
+    if (t == N_IDX) {
+        gen_addr(n);
+        if (ischar(type_of(n))) { loadz_rax(); return 0; }
+        load_rax();
+        return 0;
     }
-    if (((i == O_DIV) || (i == O_MOD)) && try_rcx(NBB[n])) {
-      div_rcx();
-      if (i == O_MOD) { e8(72); e8(137); e8(208); return 0; }
-      return 0;
+    if (t == N_NOT) { gen_expr(NAA[n]); test_rax(); setcc_al(O_EQ); return 0; }
+    if (t == N_BNOT) { gen_expr(NAA[n]); not_rax(); return 0; }
+    if (t == N_ASSIGN) {
+        i = NVV[n];
+        gen_addr(NAA[n]);
+        push_rax();
+        gen_expr(NBB[n]);
+        pop_rbx();
+        if (i) {
+            e8(72); e8(139); e8(11);
+            if (i == O_ADD + 1) { e8(72); e8(1); e8(200); }
+            if (i == O_SUB + 1) { e8(72); e8(145); e8(72); e8(41); e8(200); }
+            if (i == O_MUL + 1) { e8(72); e8(15); e8(175); e8(193);}
+            if ((i == O_DIV + 1) || (i == O_MOD + 1)) {
+                e8(72); e8(145);
+                e8(72); e8(153);
+                e8(72); e8(247); e8(249);
+            }
+            if (i == O_MOD + 1) { e8(72); e8(137); e8(208); }
+            store_rbx_q();
+            return 0;
+        }
+        if (ischar(type_of(NAA[n]))) { store_rbx_byte(); return 0; }
+        store_rbx_q();
+        return 0;
     }
-    if ((i == O_BOR) && try_rcx(NBB[n])) { or_rax_rcx(); return 0; }
-    if ((i == O_BAND) && try_rcx(NBB[n])) { and_rax_rcx(); return 0; }
-    if ((i == O_BXOR) && try_rcx(NBB[n])) { xor_rax_rcx(); return 0; }
-    if ((i == O_SHL) && try_rcx(NBB[n])) { shl_rax_cl(); return 0; }
-    if ((i == O_SHR) && try_rcx(NBB[n])) { sar_rax_cl(); return 0; }
-    push_rax();
-    gen_expr(NBB[n]); pop_rbx();
-    if (i == O_ADD) { add_rbx_rax(); return 0; }
-    if (i == O_SUB) { sub_rbx_rax(); return 0; }
-    if (i == O_MUL) { mul_rbx(); return 0; }
-    if (i == O_BOR) { or_rax_rbx(); return 0; }
-    if (i == O_BAND) { and_rax_rbx(); return 0; }
-    if (i == O_BXOR) { xor_rax_rbx(); return 0; }
-    if ((i == O_SHL) || (i == O_SHR)) {
-      xchg_rax_rbx();
-      mov_rcx_rbx();
-      if (i == O_SHL) shl_rax_cl(); else sar_rax_cl();
-      return 0;
+    if (t == N_SIZEOF) { mri(szof(NAA[n])); return 0; }
+    if (t == N_BIN) {
+        i = NVV[n];
+        if ((i == O_AND) || (i == O_OR)) {
+            j = lab_new(); k = lab_new();
+            gen_expr(NAA[n]); test_rax();
+            if (i == O_AND) je_rel(j); else jne_rel(j);
+            gen_expr(NBB[n]); test_rax();
+            if (i == O_AND) je_rel(j); else jne_rel(j);
+            if (i == O_AND) mri(1); else { e8(72); e8(49); e8(192); }
+            jmp_rel(k);
+            put_lab(j);
+            if (i == O_AND) { e8(72); e8(49); e8(192); } else mri(1);
+            put_lab(k);
+            return 0;
+        }
+        if ((i >= O_EQ) && (i <= O_GE)) {
+            if (NTY[NBB[n]] == N_NUM) {
+                gen_expr(NAA[n]);
+                cmp_rax_imm(NVV[NBB[n]]);
+                setcc_al(i);
+                return 0;
+            }
+            gen_expr(NAA[n]);
+            if (try_rcx(NBB[n])) { cmp_rax_rcx(); setcc_al(i); return 0; }
+            gen_expr(NBB[n]); push_rax();
+            gen_expr(NAA[n]); pop_rbx();
+            cmp_rax_rbx();
+            setcc_al(i);
+            return 0;
+        }
+        gen_expr(NAA[n]);
+        if ((i <= O_MUL) && try_rcx(NBB[n])) {
+            if (i == O_ADD) { add_rax_rcx(); return 0; }
+            if (i == O_SUB) { sub_rax_rcx(); return 0; }
+            mul_rax_rcx();
+            return 0;
+        }
+        if (((i == O_DIV) || (i == O_MOD)) && try_rcx(NBB[n])) {
+            div_rcx();
+            if (i == O_MOD) { e8(72); e8(137); e8(208); return 0; }
+            return 0;
+        }
+        if ((i == O_BOR) && try_rcx(NBB[n])) { or_rax_rcx(); return 0; }
+        if ((i == O_BAND) && try_rcx(NBB[n])) { and_rax_rcx(); return 0; }
+        if ((i == O_BXOR) && try_rcx(NBB[n])) { xor_rax_rcx(); return 0; }
+        if ((i == O_SHL) && try_rcx(NBB[n])) { shl_rax_cl(); return 0; }
+        if ((i == O_SHR) && try_rcx(NBB[n])) { sar_rax_cl(); return 0; }
+        push_rax();
+        gen_expr(NBB[n]); pop_rbx();
+        if (i == O_ADD) { add_rbx_rax(); return 0; }
+        if (i == O_SUB) { sub_rbx_rax(); return 0; }
+        if (i == O_MUL) { mul_rbx(); return 0; }
+        if (i == O_BOR) { or_rax_rbx(); return 0; }
+        if (i == O_BAND) { and_rax_rbx(); return 0; }
+        if (i == O_BXOR) { xor_rax_rbx(); return 0; }
+        if ((i == O_SHL) || (i == O_SHR)) {
+            xchg_rax_rbx();
+            mov_rcx_rbx();
+            if (i == O_SHL) shl_rax_cl(); else sar_rax_cl();
+            return 0;
+        }
+        div_rbx();
+        if (i == O_MOD) { e8(72); e8(137); e8(208); return 0; }
+        return 0;
     }
-    div_rbx();
-    if (i == O_MOD) { e8(72); e8(137); e8(208); return 0; }
+    if (t == N_CALL) { gen_call(n); return 0; }
+    die(0, "bad expression");
     return 0;
-  }
-  if (t == N_CALL) { gen_call(n); return 0; }
-  die(0, "bad expression");
-  return 0;
 }
 
 func genpush(a) {
-  if (a == 0) return 0;
-  genpush(NNX[a]);
-  gen_expr(a);
-  push_rax();
-  return 0;
+    if (a == 0) return 0;
+    genpush(NNX[a]);
+    gen_expr(a);
+    push_rax();
+    return 0;
 }
 
 func gen_call(n) {
-  let int i = 0;
-  let int f = 0;
-  if (NVV[n] == SYSP) {
-    if (NTY[NAA[n]] != N_NUM) die(0, "syscall(nr, a, b, c)");
-    if (NBB[n] != 4) die(0, "syscall(nr, a, b, c)");
-    gen_expr(NNX[NNX[NNX[NAA[n]]]]); push_rax();
-    gen_expr(NNX[NNX[NAA[n]]]); push_rax();
-    gen_expr(NNX[NAA[n]]); push_rax();
-    pop_rdi_rsi_rdx();
-    mri(NVV[NAA[n]]);
-    e8(15); e8(5);
+    let int i = 0;
+    let int f = 0;
+    let int a = 0;
+    let int ri = 0;
+    let int k = 0;
+    let int x0 = 0;
+    let int x1 = 0;
+    if (NVV[n] == ASMN) {
+        a = NAA[n];
+        while (a) {
+            if (NTY[a] != N_NUM) die(0, "asm() args must be constants");
+            e8(mod(NVV[a], 256));
+            a = NNX[a];
+        }
+        emit_xor_eax();
+        return 0;
+    }
+    if (NVV[n] == CLIN) { emit_cli(); return 0; }
+    if (NVV[n] == STIN) { emit_sti(); return 0; }
+    if (NVV[n] == HLTN) { emit_hlt(); return 0; }
+    if (NVV[n] == IRQN) { emit_iretq(); return 0; }
+    if ((NVV[n] == LGDN) || (NVV[n] == LIDN) || (NVV[n] == CR3N)) {
+        if (NBB[n] != 1) die(0, "intrinsic needs 1 argument");
+        gen_expr(NAA[n]);
+        if (NVV[n] == LGDN) emit_lgdt();
+        if (NVV[n] == LIDN) emit_lidt();
+        if (NVV[n] == CR3N) emit_cr3();
+        return 0;
+    }
+    if ((NVV[n] == INBN) || (NVV[n] == INLN)) {
+        if (NBB[n] != 1) die(0, "inb(port)");
+        if (NTY[NAA[n]] == N_NUM) cmp_dx_imm(NVV[NAA[n]]);
+        else { gen_expr(NAA[n]); e8(102); e8(137); e8(194); }
+        if (NVV[n] == INLN) emit_in_l(); else emit_in_b();
+        return 0;
+    }
+    if ((NVV[n] == OUTBN) || (NVV[n] == OUTLN)) {
+        if (NBB[n] != 2) die(0, "outb(port, value)");
+        gen_expr(NNX[NAA[n]]);
+        push_rax();
+        if (NTY[NAA[n]] == N_NUM) cmp_dx_imm(NVV[NAA[n]]);
+        else { gen_expr(NAA[n]); e8(102); e8(137); e8(194); }
+        e8(88);
+        if (NVV[n] == OUTLN) emit_out_l(); else emit_out_b();
+        return 0;
+    }
+    ri = -1;
+    i = 0;
+    while (i < 27) {
+        if (NVV[n] == RINM[i]) ri = i;
+        i = i + 1;
+    }
+    if (ri >= 0) {
+        k = RIA[ri];
+        if (NBB[n] != k) die(0, "intrinsic: wrong argument count");
+        if (k > 0) x0 = rarg(NAA[n]);
+        if (k > 1) x1 = rarg(NNX[NAA[n]]);
+        if (ri == 0) { e8(176 + mod(x0, 8)); e8(x1); return 0; }
+        if (ri == 1) { e8(184 + mod(x0, 8)); e8(x1); e8(x1 / 256); return 0; }
+        if (ri == 2) { e8(184 + mod(x0, 8)); e32v(x1); return 0; }
+        if (ri == 3) { e8(72); e8(199); e8(192 + mod(x0, 8)); e32v(x1); return 0; }
+        if (ri == 4) { e8(49); e8(192 + mod(x0, 8) * 8 + mod(x1, 8)); return 0; }
+        if (ri == 5) { e8(49); e8(192 + mod(x0, 8) * 8 + mod(x1, 8)); return 0; }
+        if (ri == 6) { e8(142); e8(192 + mod(x0, 8) * 8 + mod(x1, 8)); return 0; }
+        if (ri == 7) { e8(12 + mod(x0, 8)); e8(x1); return 0; }
+        if (ri == 8) { e8(13 + mod(x0, 8)); e32v(x1); return 0; }
+        if (ri == 9) { e8(205); e8(x0); return 0; }
+        if (ri == 10) { e8(228); e8(x0); return 0; }
+        if (ri == 11) { e8(230); e8(x0); return 0; }
+        if (ri == 12) { e8(15); e8(32); e8(192 + mod(x0, 8) * 8 + mod(x1, 8)); return 0; }
+        if (ri == 13) { e8(15); e8(34); e8(192 + mod(x0, 8) * 8 + mod(x1, 8)); return 0; }
+        if (ri == 14) { e8(199); e8(5); e32v(x0); e32v(x1); return 0; }
+        if (ri == 15) { e8(252); return 0; }
+        if (ri == 16) { e8(15); e8(50); return 0; }
+        if (ri == 17) { e8(15); e8(48); return 0; }
+        if (ri == 18) { e8(243); e8(72); e8(165); return 0; }
+        if (ri == 19) { e8(255); e8(224); return 0; }
+        if (ri == 20) {
+            if (RAW == 0) die(0, "label() is only valid in @raw mode");
+            if ((x0 < 0) || (x0 >= 64)) die(0, "raw label id out of range");
+            RLAB[x0] = EP; RLOK[x0] = 1;
+            return 0;
+        }
+        if (ri == 21) { e8(234); rdefer(1, x1, EP); e8(0); e8(0); e8(x0); e8(x0 / 256); return 0; }
+        if (ri == 22) { e8(234); rdefer(2, x1, EP); e32v(0); e8(x0); e8(x0 / 256); return 0; }
+        if (ri == 23) { e8(114); e8(0); rdefer(0, x0, EP - 1); return 0; }
+        if (ri == 24) { e8(235); e8(0); rdefer(0, x0, EP - 1); return 0; }
+        if (ri == 25) { e8(15); e8(1); e8(22); rdefer(1, x0, EP); e8(0); e8(0); return 0; }
+        if (ri == 26) { e8(x1 - 1); e8((x1 - 1) / 256); rdefer(2, x0, EP); e32v(0); return 0; }
+        return 0;
+    }
+    if (NVV[n] == SYSP) {
+        if (NTY[NAA[n]] != N_NUM) die(0, "syscall(nr, a, b, c)");
+        if (NBB[n] != 4) die(0, "syscall(nr, a, b, c)");
+        gen_expr(NNX[NNX[NNX[NAA[n]]]]); push_rax();
+        gen_expr(NNX[NNX[NAA[n]]]); push_rax();
+        gen_expr(NNX[NAA[n]]); push_rax();
+        pop_rdi_rsi_rdx();
+        mri(NVV[NAA[n]]);
+        e8(15); e8(5);
+        return 0;
+    }
+    f = findfun(NVV[n]);
+    if (f < 0) die(0, "unknown func");
+    if (NBB[n] != FRP[f]) die(0, "bad arg count");
+    if (NBB[n] == 0) { call_rel(FLB[f]); return 0; }
+    genpush(NNX[NAA[n]]);
+    gen_expr(NAA[n]);
+    mov_rdi_rax();
+    call_rel(FLB[f]);
+    if (NBB[n] > 1) add_rsp(8 * (NBB[n] - 1));
     return 0;
-  }
-  f = findfun(NVV[n]);
-  if (f < 0) die(0, "unknown func");
-  if (NBB[n] != FRP[f]) die(0, "bad arg count");
-  if (NBB[n] == 0) { call_rel(FLB[f]); return 0; }
-  genpush(NNX[NAA[n]]);
-  gen_expr(NAA[n]);
-  mov_rdi_rax();
-  call_rel(FLB[f]);
-  if (NBB[n] > 1) add_rsp(8 * (NBB[n] - 1));
-  return 0;
 }
 
 func gen_stmt(n) {
-  let int t = NTY[n];
-  let int i = 0;
-  let int l1 = 0;
-  let int l2 = 0;
-  if (t == N_BLOCK) {
-    l1 = NVAR; l2 = CUROFF;
-    i = NAA[n];
-    while (i) { gen_stmt(i); i = NNX[i]; }
-    NVAR = l1; CUROFF = l2;
-    return 0;
-  }
-  if (t == N_LET) {
-    if (NAA[n]) gen_expr(NAA[n]);
-    i = addloc(NVV[n], NBB[n]);
-    if (kind(NBB[n]) == 2) {
-      lea_rdi_rbp(VOF[i]);
-      if (NAA[n]) { store_rdi(); return 0; }
-      e8(72); e8(49); e8(192);
-      e8(185);
-      if (esz(NBB[n]) == 1) e32v(tsz(NBB[n]));
-      else e32v(tsz(NBB[n]) / 8);
-      if (esz(NBB[n]) == 1) { e8(243); e8(170); return 0; }
-      e8(243); e8(72); e8(171); return 0;
+    let int t = NTY[n];
+    let int i = 0;
+    let int l1 = 0;
+    let int l2 = 0;
+    if (t == N_BLOCK) {
+        l1 = NVAR; l2 = CUROFF;
+        i = NAA[n];
+        while (i) { gen_stmt(i); i = NNX[i]; }
+        NVAR = l1; CUROFF = l2;
+        return 0;
     }
-    if (NAA[n] == 0) die(0, "missing initializer");
-    if (ischar(NBB[n])) { e8(136); e8(69); e8(VOF[i]); return 0; }
-    store_rbp(VOF[i]);
+    if (t == N_LET) {
+        if (NAA[n]) gen_expr(NAA[n]);
+        i = addloc(NVV[n], NBB[n]);
+        if (kind(NBB[n]) == 2) {
+            lea_rdi_rbp(VOF[i]);
+            if (NAA[n]) { store_rdi(); return 0; }
+            e8(72); e8(49); e8(192);
+            e8(185);
+            if (esz(NBB[n]) == 1) e32v(tsz(NBB[n]));
+            else e32v(tsz(NBB[n]) / 8);
+            if (esz(NBB[n]) == 1) { e8(243); e8(170); return 0; }
+            e8(243); e8(72); e8(171); return 0;
+        }
+        if (NAA[n] == 0) die(0, "missing initializer");
+        if (ischar(NBB[n])) { e8(136); e8(69); e8(VOF[i]); return 0; }
+        store_rbp(VOF[i]);
+        return 0;
+    }
+    if (t == N_PRINT) {
+        if (FREE && (BOOT == 0)) die(0, "print is unavailable in freestanding mode");
+        gen_expr(NAA[n]);
+        call_rel(PRINTL);
+        return 0;
+    }
+    if (t == N_IF) {
+        gen_expr(NAA[n]);
+        test_rax();
+        l1 = lab_new(); l2 = lab_new();
+        je_rel(l1);
+        gen_stmt(NBB[n]);
+        jmp_rel(l2);
+        put_lab(l1);
+        if (NVV[n]) gen_stmt(NVV[n]);
+        put_lab(l2);
+        return 0;
+    }
+    if (t == N_WHILE) {
+        l1 = lab_new(); l2 = lab_new();
+        BRL[NLOOP] = l2; CTL[NLOOP] = l1; NLOOP = NLOOP + 1;
+        put_lab(l1);
+        gen_expr(NAA[n]);
+        test_rax();
+        je_rel(l2);
+        gen_stmt(NBB[n]);
+        jmp_rel(l1);
+        put_lab(l2);
+        NLOOP = NLOOP - 1;
+        return 0;
+    }
+    if (t == N_BREAK) { jmp_rel(BRL[NLOOP - 1]); return 0; }
+    if (t == N_CONTINUE) { jmp_rel(CTL[NLOOP - 1]); return 0; }
+    if (t == N_RET) { gen_expr(NAA[n]); leave_ret(); return 0; }
+    gen_expr(n);
     return 0;
-  }
-  if (t == N_PRINT) {
-    gen_expr(NAA[n]);
-    call_rel(PRINTL);
-    return 0;
-  }
-  if (t == N_IF) {
-    gen_expr(NAA[n]);
-    test_rax();
-    l1 = lab_new(); l2 = lab_new();
-    je_rel(l1);
-    gen_stmt(NBB[n]);
-    jmp_rel(l2);
-    put_lab(l1);
-    if (NVV[n]) gen_stmt(NVV[n]);
-    put_lab(l2);
-    return 0;
-  }
-  if (t == N_WHILE) {
-    l1 = lab_new(); l2 = lab_new();
-    BRL[NLOOP] = l2; CTL[NLOOP] = l1; NLOOP = NLOOP + 1;
-    put_lab(l1);
-    gen_expr(NAA[n]);
-    test_rax();
-    je_rel(l2);
-    gen_stmt(NBB[n]);
-    jmp_rel(l1);
-    put_lab(l2);
-    NLOOP = NLOOP - 1;
-    return 0;
-  }
-  if (t == N_BREAK) { jmp_rel(BRL[NLOOP - 1]); return 0; }
-  if (t == N_CONTINUE) { jmp_rel(CTL[NLOOP - 1]); return 0; }
-  if (t == N_RET) { gen_expr(NAA[n]); leave_ret(); return 0; }
-  gen_expr(n);
-  return 0;
 }
 
 
 func gen_func(n) {
-  let int p = 0;
-  let int k = 0;
-  put_lab(FLB[findfun(NVV[n])]);
-  prologue();
-  NVAR = 0; CUROFF = 0;
-  p = NAA[n];
-  if (p) {
-    k = addloc(NVV[p], TYI);
-    mov_rax_rdi();
-    store_rbp(VOF[k]);
-    p = NNX[p];
-  }
-  k = 1;
-  while (p) {
-    addloc(NVV[p], TYI);
-    load_rbp(16 + 8 * (k - 1));
-    store_rbp(VOF[NVAR - 1]);
-    p = NNX[p];
-    k = k + 1;
-  }
-  gen_stmt(NBB[n]);
-  leave_ret();
+    let int p = 0;
+    let int k = 0;
+    put_lab(FLB[findfun(NVV[n])]);
+    prologue();
+    NVAR = 0; CUROFF = 0;
+    p = NAA[n];
+    if (p) {
+        k = addloc(NVV[p], TYI);
+        mov_rax_rdi();
+        store_rbp(VOF[k]);
+        p = NNX[p];
+    }
+    k = 1;
+    while (p) {
+        addloc(NVV[p], TYI);
+        load_rbp(16 + 8 * (k - 1));
+        store_rbp(VOF[NVAR - 1]);
+        p = NNX[p];
+        k = k + 1;
+    }
+    gen_stmt(NBB[n]);
+    leave_ret();
+}
+
+func emit_entry() {
+    let int i = 0;
+    let int g = 0;
+    let int f = 0;
+    if (FREE == 0) {
+        i = 0;
+        while (i < 8) {
+            g = findglob(AVN[i]);
+            if (g >= 0) {
+                mov_rax_rsp(16 + 8 * i);
+                store_glob(GOF[g]);
+            }
+            i = i + 1;
+        }
+    }
+    prologue();
+    NVAR = 0; CUROFF = 0;
+    i = NAA[ROOT];
+    while (i) {
+        if (NTY[i] != N_FUN) {
+            g = findglob(NVV[i]);
+            if ((NTY[i] == N_LET) && (g >= 0)) {
+                if (NAA[i]) {
+                    gen_expr(NAA[i]);
+                    if (ischar(GTY[g])) store_glob_byte(GOF[g]);
+                    else store_glob(GOF[g]);
+                }
+            }
+            else gen_stmt(i);
+        }
+        i = NNX[i];
+    }
+    f = findfun(ENTN);
+    if (f >= 0) {
+        call_rel(FLB[f]);
+        if (FREE) { e8(235); e8(254); }
+        else { mov_rdi_rax(); mri(SYS_EXIT); e8(15); e8(5); }
+    } else {
+        if (FREE) { e8(235); e8(254); }
+        else { mri(SYS_EXIT); e8(49); e8(255); e8(15); e8(5); }
+    }
+    return 0;
+}
+
+func printboot() {
+    e32(0xE5894855); e32(0x20EC8348); e32(0x48DB3145); e32(0x890FC085);
+    e32(0x00000009); e32(0x41D8F748); e32(0x000001BB); e32(0x590A6A00);
+    e32(0xFF758D48); e32(0x48D23148); e32(0xC280F1F7); e32(0xCEFF4830);
+    e32(0x85481688); e32(0xE9850FC0); e32(0x45FFFFFF); e32(0x840FDB85);
+    e32(0x00000006); e32(0xC6CEFF48); e32(0xBA662D06); e32(0x394803F8);
+    e32(0x0B830FEE); e32(0x8A000000); e32(0xFF48EE06); e32(0xFFECE9C6);
+    e32(0x0AB0FFFF);
+    e8(238); e8(201); e8(195);
 }
 
 func generate() {
-  let int i = 0;
-  let int f = 0;
-  let int g = 0;
-  let int p = 0;
-  let int pc = 0;
-  HDR = HDRSZ;
-  i = NAA[ROOT];
-  while (i) {
-    if (NTY[i] == N_LET) addglob(NVV[i], NBB[i]);
-    i = NNX[i];
-  }
-  i = NAA[ROOT];
-  while (i) {
-    if (NTY[i] == N_FUN) {
-      FRN[NFN] = NVV[i]; FLB[NFN] = lab_new();
-      pc = 0;
-      p = NAA[i];
-      while (p) { pc = pc + 1; p = NNX[p]; }
-      FRP[NFN] = pc;
-      NFN = NFN + 1;
-    }
-    i = NNX[i];
-  }
-  PRINTL = lab_new();
-  put_lab(PRINTL);
-  e8(85);
-  e8(72); e8(137); e8(229);
-  e8(72); e8(131); e8(236); e8(32);
-  e8(69); e8(49); e8(219);
-  test_rax();
-  e8(15); e8(137); e32(9);
-  e8(72); e8(247); e8(216);
-  e8(65); e8(187); e32(1);
-  e8(106); e8(10); e8(89);
-  e8(72); e8(141); e8(117); e8(255);
-  e8(72); e8(49); e8(210);
-  e8(72); e8(247); e8(241);
-  e8(128); e8(194); e8(48);
-  e8(72); e8(255); e8(206);
-  e8(136); e8(22);
-  test_rax();
-  e8(117); e8(237);
-  e8(69); e8(133); e8(219);
-  e8(116); e8(6);
-  e8(72); e8(255); e8(206);
-  e8(198); e8(6); e8(45);
-  e8(72); e8(141); e8(85); e8(255);
-  e8(72); e8(41); e8(242);
-  e8(106); e8(1); e8(88);
-  mov_rdi_rax();
-  e8(15); e8(5);
-  leave_ret();
-  LITLAB = lab_new();
-  i = NAA[ROOT];
-  while (i) {
-    if (NTY[i] == N_FUN) gen_func(i);
-    i = NNX[i];
-  }
-  ENTRY = EP;
-  i = findglob(A1N);
-  if (i >= 0) {
-    mov_rax_rsp(16);
-    store_glob(GOF[i]);
-  }
-  i = findglob(A2N);
-  if (i >= 0) {
-    mov_rax_rsp(24);
-    store_glob(GOF[i]);
-  }
-  prologue();
-  NVAR = 0; CUROFF = 0;
-  i = NAA[ROOT];
-  while (i) {
-    if (NTY[i] != N_FUN) {
-      g = findglob(NVV[i]);
-      if ((NTY[i] == N_LET) && (g >= 0)) {
-        if (NAA[i]) {
-          gen_expr(NAA[i]);
-          if (ischar(GTY[g])) store_glob_byte(GOF[g]);
-          else store_glob(GOF[g]);
+    let int i = 0;
+    let int f = 0;
+    let int g = 0;
+    let int p = 0;
+    let int pc = 0;
+    HDR = HDRSZ;
+    if (RAW) {
+        LITLAB = lab_new();
+        i = NAA[ROOT];
+        while (i) {
+            if (NTY[i] != N_FUN) gen_stmt(i);
+            i = NNX[i];
         }
-      }
-      else gen_stmt(i);
+        ENTRY = 0;
+        put_lab(LITLAB);
+        rawapply();
+        i = 0;
+        while (i < NPT) {
+            if (PTG[i] == 0) poke32(PTP[i], LBP[PTV[i]] - PTP[i] - 4);
+            if (PTG[i] == 1) poke32(PTP[i], LBP[LITLAB] + PTV[i] - PTP[i] - 4);
+            if (PTG[i] == 2) poke32(PTP[i], SEG2 + PTV[i] - (LOADBASE + HDR + PTP[i] + 4));
+            i = i + 1;
+        }
+        i = 0;
+        while (i < NSTR) { OUT[HDR + EP + i] = STR[i]; i = i + 1; }
+        return 0;
     }
-    i = NNX[i];
-  }
-  f = findfun(intern("main"));
-  if (f >= 0) {
-    call_rel(FLB[f]);
-    mov_rdi_rax();
-    mri(SYS_EXIT); e8(15); e8(5);
-  }
-  if (f < 0) { mri(SYS_EXIT); e8(49); e8(255); e8(15); e8(5); }
-  put_lab(LITLAB);
-  SEG2 = BASE + HDR + EP + NSTR;
-  i = 0;
-  while (i < NPT) {
-    if (PTG[i] == 0) poke32(PTP[i], LBP[PTV[i]] - PTP[i] - 4);
-    if (PTG[i] == 1) poke32(PTP[i], LBP[LITLAB] + PTV[i] - PTP[i] - 4);
-    if (PTG[i] == 2) poke32(PTP[i], SEG2 + PTV[i] - (BASE + HDR + PTP[i] + 4));
-    i = i + 1;
-  }
-  i = 0;
-  while (i < NSTR) { OUT[HDR + EP + i] = STR[i]; i = i + 1; }
+    i = NAA[ROOT];
+    while (i) {
+        if (NTY[i] == N_LET) addglob(NVV[i], NBB[i]);
+        i = NNX[i];
+    }
+    i = NAA[ROOT];
+    while (i) {
+        if (NTY[i] == N_FUN) {
+            if (NFN >= 256) die(0, "too many functions");
+            FRN[NFN] = NVV[i]; FLB[NFN] = lab_new();
+            pc = 0;
+            p = NAA[i];
+            while (p) { pc = pc + 1; p = NNX[p]; }
+            FRP[NFN] = pc;
+            NFN = NFN + 1;
+        }
+        i = NNX[i];
+    }
+    if (FREE == 0) {
+        PRINTL = lab_new();
+        put_lab(PRINTL);
+        e8(85);
+        e8(72); e8(137); e8(229);
+        e8(72); e8(131); e8(236); e8(32);
+        e8(69); e8(49); e8(219);
+        test_rax();
+        e8(15); e8(137); e32(9);
+        e8(72); e8(247); e8(216);
+        e8(65); e8(187); e32(1);
+        e8(106); e8(10); e8(89);
+        e8(72); e8(141); e8(117); e8(255);
+        e8(72); e8(49); e8(210);
+        e8(72); e8(247); e8(241);
+        e8(128); e8(194); e8(48);
+        e8(72); e8(255); e8(206);
+        e8(136); e8(22);
+        test_rax();
+        e8(117); e8(237);
+        e8(69); e8(133); e8(219);
+        e8(116); e8(6);
+        e8(72); e8(255); e8(206);
+        e8(198); e8(6); e8(45);
+        e8(72); e8(141); e8(85); e8(255);
+        e8(72); e8(41); e8(242);
+        e8(106); e8(1); e8(88);
+        mov_rdi_rax();
+        e8(15); e8(5);
+        leave_ret();
+    }
+    LITLAB = lab_new();
+    if (FMT == 1) { ENTRY = EP; emit_entry(); }
+    if (BOOT) { PRINTL = lab_new(); put_lab(PRINTL); printboot(); }
+    i = NAA[ROOT];
+    while (i) {
+        if (NTY[i] == N_FUN) gen_func(i);
+        i = NNX[i];
+    }
+    if (FMT != 1) { ENTRY = EP; emit_entry(); }
+    put_lab(LITLAB);
+    SEG2 = LOADBASE + HDR + EP + NSTR;
+    i = 0;
+    while (i < NPT) {
+        if (PTG[i] == 0) poke32(PTP[i], LBP[PTV[i]] - PTP[i] - 4);
+        if (PTG[i] == 1) poke32(PTP[i], LBP[LITLAB] + PTV[i] - PTP[i] - 4);
+        if (PTG[i] == 2) poke32(PTP[i], SEG2 + PTV[i] - (LOADBASE + HDR + PTP[i] + 4));
+        i = i + 1;
+    }
+    i = 0;
+    while (i < NSTR) { OUT[HDR + EP + i] = STR[i]; i = i + 1; }
 }
 
 
-func readsrc() {
-  FD = syscall(SYS_OPEN, argv1, 0, 0);
-  if (FD < 0) die(0, "cannot open input");
-  NSRC = syscall(SYS_READ, FD, SRC, 65535);
-  syscall(SYS_CLOSE, FD, 0, 0);
-  SRC[NSRC] = 0;
+func readsrc(fn) {
+    FD = syscall(SYS_OPEN, fn, 0, 0);
+    if (FD < 0) die(0, "cannot open input");
+    NSRC = syscall(SYS_READ, FD, SRC, 65535);
+    syscall(SYS_CLOSE, FD, 0, 0);
+    SRC[NSRC] = 0;
 }
 
 func writeout() {
-  let int flen = 0;
-  flen = HDR + EP + NSTR;
-  OUT[0] = 127; OUT[1] = 69; OUT[2] = 76; OUT[3] = 70;
-  OUT[4] = 2; OUT[5] = 1; OUT[6] = 1;
-  p16(16, ET_EXEC);
-  p16(18, EM_X64);
-  p32(20, 1);
-  p64(24, BASE + HDR + ENTRY);
-  p64(32, 64);
-  p16(52, 64); p16(54, 56); p16(56, 1);
-  p32(64, PT_LOAD); p32(68, PF_RWX);
-  p64(72, 0); p64(80, BASE); p64(88, BASE);
-  p64(96, flen); p64(104, flen + GSZ);
-  p64(112, PAGE);
-  FD = syscall(SYS_OPEN, OUTN, 577, 493);
-  if (FD < 0) die(0, "cannot create output");
-  syscall(SYS_WRITE, FD, OUT, flen);
-  syscall(SYS_CLOSE, FD, 0, 0);
+    let int flen = 0;
+    flen = HDR + EP + NSTR;
+    OUT[0] = 127; OUT[1] = 69; OUT[2] = 76; OUT[3] = 70;
+    OUT[4] = 2; OUT[5] = 1; OUT[6] = 1;
+    p16(16, ET_EXEC);
+    p16(18, EM_X64);
+    p32(20, 1);
+    p64(24, LOADBASE + HDR + ENTRY);
+    p64(32, 64);
+    p16(52, 64); p16(54, 56); p16(56, 1);
+    p32(64, PT_LOAD); p32(68, PF_RWX);
+    p64(72, 0); p64(80, LOADBASE); p64(88, LOADBASE);
+    p64(96, flen); p64(104, flen + GSZ);
+    p64(112, PAGE);
+    FD = syscall(SYS_OPEN, OUTN, 577, 493);
+    if (FD < 0) die(0, "cannot create output");
+    syscall(SYS_WRITE, FD, OUT, flen);
+    syscall(SYS_CLOSE, FD, 0, 0);
+}
+
+func writebin() {
+    let int flen = 0;
+    let int left = 0;
+    let int n = 0;
+    let int i = 0;
+    let int w = 0;
+    if (BOOT) {
+        if (EP + NSTR + GSZ > 8192) die(0, "kernel image exceeds 8192 bytes");
+        BW[0]=0x8EC031FA; BW[1]=0x8EC08ED8; BW[2]=0x7C00BCD0; BW[3]=0x8E1000B8; BW[4]=0xB4DB31C0; BW[5]=0xB510B002; BW[6]=0xB602B100;
+        BW[7]=0x7213CD00; BW[8]=0x0C92E418; BW[9]=0x0F92E602; BW[10]=0x7D091601; BW[11]=0x0CC0200F; BW[12]=0xC0220F01; BW[13]=0x087C3CEA;
+        BW[14]=0xFDEBF400; BW[15]=0x000010B8; BW[16]=0x8ED88E00; BW[17]=0xBCD08EC0; BW[18]=0x00007C00; BW[19]=0x100005C7; BW[20]=0x20030000;
+        BW[21]=0x05C70000; BW[22]=0x00001004; BW[23]=0x00000000; BW[24]=0x200005C7; BW[25]=0x30030000; BW[26]=0x05C70000; BW[27]=0x00002004;
+        BW[28]=0x00000000; BW[29]=0x300005C7; BW[30]=0x00830000; BW[31]=0x05C70000; BW[32]=0x00003004; BW[33]=0x00000000; BW[34]=0x0DE0200F;
+        BW[35]=0x00000020; BW[36]=0xB8E0220F; BW[37]=0x00001000; BW[38]=0xB9D8220F; BW[39]=0xC0000080; BW[40]=0x000D320F; BW[41]=0x0F000001;
+        BW[42]=0xC0200F30; BW[43]=0x0000010D; BW[44]=0xC0220F80; BW[45]=0x007CBBEA; BW[46]=0xB8001800; BW[47]=0x00000010; BW[48]=0xC08ED88E;
+        BW[49]=0xC748D08E; BW[50]=0x080000C4; BW[51]=0x00BEFC00; BW[52]=0xBF000100; BW[53]=0x00100000; BW[54]=0x000400B9; BW[55]=0xA548F300;
+        BW[56]=0x100000B8; BW[57]=0x00E0FF00; BW[58]=0x00000000; BW[59]=0xFF000000; BW[60]=0x000000FF; BW[61]=0xFF00CF9A; BW[62]=0x000000FF;
+        BW[63]=0xFF00CF92; BW[64]=0x000000FF; BW[65]=0x3100AF9A; BW[66]=0xE7001FC0;
+        FD = syscall(SYS_OPEN, OUTN, 577, 493);
+        if (FD < 0) die(0, "cannot create output");
+        i = 0;
+        while (i < HDR) { OUT[i] = 0; i = i + 1; }
+        i = 0;
+        while (i < 67) {
+            w = BW[i];
+            OUT[0] = w; OUT[1] = w / 256; OUT[2] = w / 65536; OUT[3] = w / 16777216;
+            syscall(SYS_WRITE, FD, OUT, 4);
+            i = i + 1;
+        }
+        OUT[0] = 0x7C; OUT[1] = 0; OUT[2] = 0;
+        syscall(SYS_WRITE, FD, OUT, 3);
+        i = 0;
+        while (i < HDR) { OUT[i] = 0; i = i + 1; }
+        left = 510 - 271;
+        while (left > 0) {
+            n = left;
+            if (n > HDR) n = HDR;
+            syscall(SYS_WRITE, FD, OUT, n);
+            left = left - n;
+        }
+        OUT[0] = 85; OUT[1] = 170;
+        syscall(SYS_WRITE, FD, OUT, 2);
+        syscall(SYS_WRITE, FD, &OUT[HDR], EP + NSTR);
+        i = 0;
+        while (i < HDR) { OUT[i] = 0; i = i + 1; }
+        left = 8192 - EP - NSTR;
+        while (left > 0) {
+            n = left;
+            if (n > HDR) n = HDR;
+            syscall(SYS_WRITE, FD, OUT, n);
+            left = left - n;
+        }
+        syscall(SYS_CLOSE, FD, 0, 0);
+        return 0;
+    }
+    if (RAW) {
+        if (EP > 510) die(0, "raw boot sector exceeds 510 bytes");
+        FD = syscall(SYS_OPEN, OUTN, 577, 493);
+        if (FD < 0) die(0, "cannot create output");
+        syscall(SYS_WRITE, FD, &OUT[HDR], EP);
+        i = 0;
+        while (i < HDR) { OUT[i] = 0; i = i + 1; }
+        left = 510 - EP;
+        while (left > 0) {
+            n = left;
+            if (n > HDR) n = HDR;
+            syscall(SYS_WRITE, FD, OUT, n);
+            left = left - n;
+        }
+        OUT[0] = 85; OUT[1] = 170;
+        syscall(SYS_WRITE, FD, OUT, 2);
+        syscall(SYS_CLOSE, FD, 0, 0);
+        return 0;
+    }
+    flen = EP + NSTR;
+    FD = syscall(SYS_OPEN, OUTN, 577, 493);
+    if (FD < 0) die(0, "cannot create output");
+    syscall(SYS_WRITE, FD, &OUT[HDR], flen);
+    left = GSZ;
+    while (left > 0) {
+        n = left;
+        if (n > HDR) n = HDR;
+        syscall(SYS_WRITE, FD, OUT, n);
+        left = left - n;
+    }
+    syscall(SYS_CLOSE, FD, 0, 0);
+    return 0;
 }
 
 
 func main() {
-  KWT[0] = intern("let");
-  KWT[1] = intern("print");
-  KWT[2] = intern("if");
-  KWT[3] = intern("else");
-  KWT[4] = intern("while");
-  KWT[5] = intern("return");
-  KWT[6] = intern("func");
-  KWT[7] = intern("sizeof");
-  KWT[8] = intern("int");
-  KWT[9] = intern("char");
-  KWT[10] = intern("break");
-  KWT[11] = intern("continue");
-  P1['+'] = T_PLUS; P1['-'] = T_MINUS; P1['*'] = T_STAR; P1['/'] = T_SLASH; P1['&'] = T_AMP;
-  P1['%'] = T_PERCENT; P1['!'] = T_NOT;
-  P1['['] = T_LBR; P1[']'] = T_RBR; P1[';'] = T_SEMI; P1[','] = T_COMMA; P1['('] = T_LP; P1[')'] = T_RP;
-  P1['{'] = T_LBRACE; P1['}'] = T_RBRACE; P1['='] = T_ASSIGN; P1['<'] = T_LT; P1['>'] = T_GT;
-  P1['|'] = T_PIPE; P1['^'] = T_CARET; P1['~'] = T_TILDE;
-  P2['='] = T_EQ; P2['!'] = T_NE; P2['<'] = T_LE; P2['>'] = T_GE;
-  P2['+'] = T_PLUSEQ; P2['-'] = T_MINUSEQ; P2['*'] = T_STAREQ; P2['/'] = T_SLASHEQ; P2['%'] = T_MODEQ;
-  BINP[T_EQ] = 196; BINP[T_NE] = 197; BINP[T_LT] = 198; BINP[T_GT] = 199; BINP[T_LE] = 200; BINP[T_GE] = 201;
-  BINP[T_ANDAND] = 75; BINP[T_OROR] = 44;
-  BINP[T_PIPE] = 109; BINP[T_CARET] = 143; BINP[T_AMP] = 174;
-  BINP[T_SHL] = 272; BINP[T_SHR] = 273;
-  BINP[T_PLUS] = 288; BINP[T_MINUS] = 289;
-  BINP[T_STAR] = 322; BINP[T_SLASH] = 323; BINP[T_PERCENT] = 330;
-  SYSP = intern("syscall");
-  CNAME = intern("const");
-  A1N = intern("argv1");
-  A2N = intern("argv2");
-  NND = 1;
-  if (argv1 == 0) die(0, "usage: lgc <src.lg> [out]");
-  readsrc();
-  lex();
-  ROOT = program();
-  generate();
-  OUTN = argv2;
-  if (OUTN == 0) OUTN = "a.out";
-  writeout();
-  return 0;
+    let int ai = 0;
+    let int cfmt = -1;
+    let int cbase = -1;
+    let int cent = 0;
+    let int cfree = -1;
+    let int i = 0;
+    KWT[0] = intern("let");
+    KWT[1] = intern("print");
+    KWT[2] = intern("if");
+    KWT[3] = intern("else");
+    KWT[4] = intern("while");
+    KWT[5] = intern("return");
+    KWT[6] = intern("func");
+    KWT[7] = intern("sizeof");
+    KWT[8] = intern("int");
+    KWT[9] = intern("char");
+    KWT[10] = intern("break");
+    KWT[11] = intern("continue");
+    P1['+'] = T_PLUS; P1['-'] = T_MINUS; P1['*'] = T_STAR; P1['/'] = T_SLASH; P1['&'] = T_AMP;
+    P1['%'] = T_PERCENT; P1['!'] = T_NOT;
+    P1['['] = T_LBR; P1[']'] = T_RBR; P1[';'] = T_SEMI; P1[','] = T_COMMA; P1['('] = T_LP; P1[')'] = T_RP;
+    P1['{'] = T_LBRACE; P1['}'] = T_RBRACE; P1['='] = T_ASSIGN; P1['<'] = T_LT; P1['>'] = T_GT;
+    P1['|'] = T_PIPE; P1['^'] = T_CARET; P1['~'] = T_TILDE; P1['@'] = T_AT;
+    P2['='] = T_EQ; P2['!'] = T_NE; P2['<'] = T_LE; P2['>'] = T_GE;
+    P2['+'] = T_PLUSEQ; P2['-'] = T_MINUSEQ; P2['*'] = T_STAREQ; P2['/'] = T_SLASHEQ; P2['%'] = T_MODEQ;
+    BINP[T_EQ] = 196; BINP[T_NE] = 197; BINP[T_LT] = 198; BINP[T_GT] = 199; BINP[T_LE] = 200; BINP[T_GE] = 201;
+    BINP[T_ANDAND] = 75; BINP[T_OROR] = 44;
+    BINP[T_PIPE] = 109; BINP[T_CARET] = 143; BINP[T_AMP] = 174;
+    BINP[T_SHL] = 272; BINP[T_SHR] = 273;
+    BINP[T_PLUS] = 288; BINP[T_MINUS] = 289;
+    BINP[T_STAR] = 322; BINP[T_SLASH] = 323; BINP[T_PERCENT] = 330;
+    SYSP = intern("syscall");
+    CNAME = intern("const");
+    A1N = intern("argv1");
+    A2N = intern("argv2");
+    DBN = intern("base"); DEN = intern("entry"); DBIN = intern("bin"); DELF = intern("elf"); DNORT = intern("nort");
+    DRAWN = intern("raw");
+    DBOOT = intern("boot");
+    ASMN = intern("asm"); CLIN = intern("cli"); STIN = intern("sti"); HLTN = intern("hlt");
+    IRQN = intern("iretq"); LGDN = intern("lgdt"); LIDN = intern("lidt"); CR3N = intern("mov_cr3");
+    INBN = intern("inb"); INLN = intern("inl"); OUTBN = intern("outb"); OUTLN = intern("outl");
+    RINM[0] = intern("movb"); RINM[1] = intern("movw"); RINM[2] = intern("movl"); RINM[3] = intern("movq");
+    RINM[4] = intern("xorw"); RINM[5] = intern("xorl"); RINM[6] = intern("movsreg");
+    RINM[7] = intern("orb"); RINM[8] = intern("orl"); RINM[9] = intern("int_n");
+    RINM[10] = intern("in_al"); RINM[11] = intern("out_al"); RINM[12] = intern("cr_read"); RINM[13] = intern("cr_write");
+    RINM[14] = intern("store32"); RINM[15] = intern("cld"); RINM[16] = intern("rdmsr"); RINM[17] = intern("wrmsr");
+    RINM[18] = intern("rep_movsq"); RINM[19] = intern("jmp_rax"); RINM[20] = intern("label");
+    RINM[21] = intern("ljmp16"); RINM[22] = intern("ljmp32"); RINM[23] = intern("jc"); RINM[24] = intern("jmp");
+    RINM[25] = intern("lgdt_at"); RINM[26] = intern("gdt_desc16");
+    RIA[0] = 2; RIA[1] = 2; RIA[2] = 2; RIA[3] = 2; RIA[4] = 2; RIA[5] = 2; RIA[6] = 2;
+    RIA[7] = 2; RIA[8] = 2; RIA[9] = 1; RIA[10] = 1; RIA[11] = 1; RIA[12] = 2; RIA[13] = 2;
+    RIA[14] = 2; RIA[15] = 0; RIA[16] = 0; RIA[17] = 0; RIA[18] = 0; RIA[19] = 0;
+    RIA[20] = 1; RIA[21] = 2; RIA[22] = 2; RIA[23] = 1; RIA[24] = 1; RIA[25] = 1; RIA[26] = 2;
+    NB[0] = 97; NB[1] = 114; NB[2] = 103; NB[3] = 118;
+    i = 0;
+    while (i < 8) { NB[4] = 49 + i; NB[5] = 0; AVN[i] = intern(NB); i = i + 1; }
+    ENTN = intern("main");
+    LOADBASE = 4194304;
+    NND = 1;
+    if (argv1 == 0) die(0, "usage: lgc [-f elf|bin] [-b base] [-e sym] [-r] <src.lg> [out]");
+    ai = 0;
+    while ((ai < 8) && (argi(ai) != 0) && (pchr(argi(ai), 0) == 45)) {
+        if (scmp(argi(ai), "-f")) {
+            ai = ai + 1;
+            if (argi(ai) == 0) die(0, "missing -f argument");
+            if (scmp(argi(ai), "bin")) cfmt = 1;
+            else if (scmp(argi(ai), "pe")) die(0, "pe output unsupported");
+            else cfmt = 0;
+        } else if (scmp(argi(ai), "-b")) {
+            ai = ai + 1;
+            if (argi(ai) == 0) die(0, "missing -b argument");
+            cbase = numstr(argi(ai));
+        } else if (scmp(argi(ai), "-e")) {
+            ai = ai + 1;
+            if (argi(ai) == 0) die(0, "missing -e argument");
+            cent = intern(argi(ai));
+        } else if (scmp(argi(ai), "-r")) cfree = 1;
+        else die(0, "unknown option");
+        ai = ai + 1;
+    }
+    SRCARG = argi(ai);
+    if (SRCARG == 0) die(0, "usage: lgc [-f elf|bin] [-b base] [-e sym] [-r] <src.lg> [out]");
+    OUTARG = argi(ai + 1);
+    if (OUTARG == 0) OUTARG = "a.out";
+    readsrc(SRCARG);
+    lex();
+    ROOT = program();
+    if (cfmt >= 0) FMT = cfmt;
+    if (cbase >= 0) LOADBASE = cbase;
+    if (cent) ENTN = cent;
+    if (cfree >= 0) FREE = cfree;
+    if (RAW) { FMT = 1; FREE = 1; }
+    if (BOOT) { FMT = 1; FREE = 1; LOADBASE = 1048576; }
+    if (FMT == 1) FREE = 1;
+    generate();
+    OUTN = OUTARG;
+    if (FMT == 1) writebin();
+    else writeout();
+    return 0;
 }

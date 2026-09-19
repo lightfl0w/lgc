@@ -65,6 +65,7 @@ typedef enum {
     TOK_LPAREN, TOK_RPAREN, TOK_LBRACE, TOK_RBRACE,
     TOK_PERCENT, TOK_ANDAND, TOK_OROR,
     TOK_PLUS_EQ, TOK_MINUS_EQ, TOK_STAR_EQ, TOK_SLASH_EQ, TOK_PERCENT_EQ, TOK_NOT,
+    TOK_AT,
     TOK_EOF, TOK_ERROR
 } TokenType;
 
@@ -82,7 +83,8 @@ static const uint64_t PUNCT_BIT[2] = {
     (1ULL << 33) | (1ULL << 37) | (1ULL << 38) | (1ULL << 40) | (1ULL << 41) | (1ULL << 42) | (1ULL << 43) |
     (1ULL << 44) | (1ULL << 45) | (1ULL << 47) | (1ULL << 59) |
     (1ULL << 60) | (1ULL << 61) | (1ULL << 62),
-    (1ULL << 27) | (1ULL << 29) | (1ULL << 30) | (1ULL << 59) | (1ULL << 60) | (1ULL << 61) | (1ULL << 62),
+    (1ULL << 27) | (1ULL << 29) | (1ULL << 30) | (1ULL << 59) | (1ULL << 60) | (1ULL << 61) | (1ULL << 62) |
+    (1ULL << 0),
 };
 
 static const uint64_t PAIR_BIT[2] = {
@@ -97,7 +99,7 @@ static const TokenType CHAR_TOK[128] = {
     [';'] = TOK_SEMICOLON, [','] = TOK_COMMA,
     ['('] = TOK_LPAREN, [')'] = TOK_RPAREN, ['{'] = TOK_LBRACE, ['}'] = TOK_RBRACE,
     ['='] = TOK_ASSIGN, ['!'] = TOK_NOT, ['<'] = TOK_LT, ['>'] = TOK_GT,
-    ['|'] = TOK_PIPE, ['^'] = TOK_CARET, ['~'] = TOK_TILDE,
+    ['|'] = TOK_PIPE, ['^'] = TOK_CARET, ['~'] = TOK_TILDE, ['@'] = TOK_AT,
 };
 
 static const TokenType PAIR2_TOK[128] = {
@@ -603,19 +605,101 @@ static ASTNode *parse_function(Parser *p) {
     return f;
 }
 
+enum { FMT_ELF, FMT_BIN, FMT_PE };
+static int fmt = FMT_ELF;
+static long long load_base = 0x400000;
+static char *entry_name;
+static int freestanding;
+static int raw_mode;
+static int boot_mode;
+static int printlab;
+
+static void parse_directive(Parser *p) {
+    int line = p->cur.line;
+    adv(p);
+    if (p->cur.type != TOK_IDENTIFIER) die("directive name expected", line);
+    char *d = strdup(p->cur.text);
+    adv(p);
+    if (!strcmp(d, "base")) {
+        if (p->cur.type != TOK_NUMBER) die("@base needs a number", line);
+        load_base = strtoll(p->cur.text, 0, 0);
+        adv(p);
+    } else if (!strcmp(d, "entry")) {
+        if (p->cur.type != TOK_IDENTIFIER) die("@entry needs a symbol", line);
+        entry_name = strdup(p->cur.text);
+        adv(p);
+    } else if (!strcmp(d, "bin")) fmt = FMT_BIN;
+    else if (!strcmp(d, "elf")) fmt = FMT_ELF;
+    else if (!strcmp(d, "pe"))  fmt = FMT_PE;
+    else if (!strcmp(d, "nort")) freestanding = 1;
+    else if (!strcmp(d, "raw")) raw_mode = 1;
+    else if (!strcmp(d, "boot")) boot_mode = 1;
+    else die("unknown directive", line);
+    expect(p, TOK_SEMICOLON, "expected ';' after directive");
+}
+
 static ASTNode *parse_program(Parser *p) {
     ASTNode *root = node(NODE_BLOCK, 0);
-    while (p->cur.type != TOK_EOF)
+    while (p->cur.type != TOK_EOF) {
+        if (p->cur.type == TOK_AT) { parse_directive(p); continue; }
         PUSH(root->data.block.stmts, root->data.block.count, root->data.block.cap,
              p->cur.type == TOK_FUNC ? parse_function(p) : parse_statement(p));
+    }
     return root;
 }
 
 static uint8_t code[262144];
 static int clen, entry, is_pe;
-static int lab_pos[1024], nlab = 1;
+static int lab_pos[8192], nlab = 1;
 static struct { int pos, lab, g; } PATCH[8192];   
 static int npatch, litlab, pcb;
+
+enum {
+    RI_MOVB, RI_MOVW, RI_MOVL, RI_MOVQ, RI_XORW, RI_XORL, RI_MOVSREG,
+    RI_ORB, RI_ORL, RI_INTN, RI_INAL, RI_OUTAL, RI_CRRD, RI_CRWR,
+    RI_ST32, RI_CLD, RI_RDMSR, RI_WRMSR, RI_REPMOVSQ, RI_JMPRAX,
+    RI_LABEL, RI_LJMP16, RI_LJMP32, RI_JC, RI_JMP, RI_LGDTAT, RI_GDTDESC
+};
+static const char *RINAME[] = {
+    "movb", "movw", "movl", "movq", "xorw", "xorl", "movsreg",
+    "orb", "orl", "int_n", "in_al", "out_al", "cr_read", "cr_write",
+    "store32", "cld", "rdmsr", "wrmsr", "rep_movsq", "jmp_rax",
+    "label", "ljmp16", "ljmp32", "jc", "jmp", "lgdt_at", "gdt_desc16"
+};
+static const int RINARG[] = {
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 2, 2,
+    2, 0, 0, 0, 0, 0, 1, 2, 2, 1, 1, 1, 2
+};
+static int rawlab[64], rawlab_ok[64];
+static struct { int pos, kind, id; } RPATCH[128];
+static int nrpatch;
+
+static long cval(ASTNode *a, int line) {
+    if (!a || a->type != NODE_NUMBER) die("intrinsic argument must be a constant", line);
+    return (long)a->data.number.value;
+}
+static void raw_defer(int kind, int id, int pos) {
+    if (!raw_mode) die("raw label intrinsics are only valid in @raw mode", 0);
+    if (nrpatch >= (int)(sizeof RPATCH / sizeof *RPATCH)) die("too many raw patches", 0);
+    RPATCH[nrpatch].kind = kind; RPATCH[nrpatch].id = id; RPATCH[nrpatch].pos = pos; nrpatch++;
+}
+static void raw_apply(void) {
+    for (int i = 0; i < nrpatch; i++) {
+        int p = RPATCH[i].pos, id = RPATCH[i].id;
+        if (id < 0 || id >= 64 || !rawlab_ok[id]) die("undefined raw label", 0);
+        if (RPATCH[i].kind == 0) {
+            int rel = rawlab[id] - (p + 1);
+            if (rel < -128 || rel > 127) die("raw branch out of range", 0);
+            code[p] = (uint8_t)rel;
+        } else if (RPATCH[i].kind == 1) {
+            uint16_t v = (uint16_t)(0x7C00 + rawlab[id]);
+            memcpy(code + p, &v, 2);
+        } else {
+            uint32_t v = (uint32_t)(0x7C00 + rawlab[id]);
+            memcpy(code + p, &v, 4);
+        }
+    }
+}
 
 #define EMIT(...) do {                                   \
     uint8_t _bs[] = { __VA_ARGS__ };                     \
@@ -852,6 +936,50 @@ static void emit_print_elf(void) {
     EMIT(0xC9,0xC3);
 }
 
+static void emit_print_bare(void) {
+    EMIT(0x55);                              /* push rbp */
+    EMIT(0x48,0x89,0xE5);                    /* mov rbp, rsp */
+    EMIT(0x48,0x83,0xEC,0x20);               /* sub rsp, 0x20 */
+    EMIT(0x45,0x31,0xDB);                    /* xor r11d, r11d: negative flag */
+    EMIT(0x48,0x85,0xC0);                    /* test rax, rax */
+    int pos = new_label();
+    emit_jcc(0x89, pos);                     /* js: negative */
+    EMIT(0x48,0xF7,0xD8);                    /* neg rax */
+    EMIT(0x41,0xBB,1,0,0,0);                 /* mov r11d, 1 */
+    put_label(pos);
+    EMIT(0x6A,0x0A,0x59);                    /* push 10; pop rcx */
+    EMIT(0x48,0x8D,0x75,0xFF);               /* lea rsi, [rbp-1]: buffer end */
+    int loop = new_label();
+    put_label(loop);
+    EMIT(0x48,0x31,0xD2);                    /* xor rdx, rdx */
+    EMIT(0x48,0xF7,0xF1);                    /* div rcx */
+    EMIT(0x80,0xC2,0x30);                    /* add dl, '0' */
+    EMIT(0x48,0xFF,0xCE);                    /* dec rsi */
+    EMIT(0x88,0x16);                         /* mov [rsi], dl */
+    EMIT(0x48,0x85,0xC0);                    /* test rax, rax */
+    emit_jcc(0x85, loop);                    /* jnz loop */
+    EMIT(0x45,0x85,0xDB);                    /* test r11d, r11d */
+    int wr = new_label();
+    emit_jcc(0x84, wr);                      /* jz: no sign */
+    EMIT(0x48,0xFF,0xCE);                    /* dec rsi */
+    EMIT(0xC6,0x06,0x2D);                    /* mov byte [rsi], '-' */
+    put_label(wr);
+    EMIT(0x66,0xBA,0xF8,0x03);               /* mov dx, 0x3F8 (COM1) */
+    int oloop = new_label();
+    put_label(oloop);
+    EMIT(0x48,0x39,0xEE);                    /* cmp rsi, rbp */
+    int onl = new_label();
+    emit_jcc(0x83, onl);                     /* jae: done */
+    EMIT(0x8A,0x06);                         /* mov al, [rsi] */
+    EMIT(0xEE);                              /* out dx, al */
+    EMIT(0x48,0xFF,0xC6);                    /* inc rsi */
+    emit_jmp(oloop);
+    put_label(onl);
+    EMIT(0xB0,0x0A);                         /* mov al, 10 */
+    EMIT(0xEE);                              /* out dx, al */
+    EMIT(0xC9,0xC3);                         /* leave; ret */
+}
+
 static void gen_expr(ASTNode*);
 static void gen_stmt(ASTNode*);
 
@@ -967,7 +1095,7 @@ static void gen_expr(ASTNode *n) {
             if (g && g->reg) {
                 int r = g->reg;
                 gen_expr(n->data.assign.rhs);
-                if (cop < 0) { greg_store_rax(r); break; }          /* g = e */
+                if (cop < 0) { greg_store_rax(r); break; }
                 int sync = 1;
                 switch (cop) {
                     case OP_ADD: EMIT((uint8_t)(0x48 | (r >= 8)), 0x01, (uint8_t)(0xC0 | (r & 7))); break;   /* add  rN,rax */
@@ -1122,7 +1250,94 @@ static void gen_expr(ASTNode *n) {
             break;
         }
         case NODE_CALL: {
-            if (!strcmp(n->data.call.name, "syscall")) {
+            const char *nm = n->data.call.name;
+            int ac = n->data.call.acount;
+            if (!strcmp(nm, "asm")) {
+                for (int i = 0; i < ac; i++) {
+                    ASTNode *a = n->data.call.args[i];
+                    if (a->type != NODE_NUMBER) die("asm() args must be constants", n->line);
+                    EMIT((uint8_t)a->data.number.value);
+                }
+                EMIT(0x31, 0xC0);
+                break;
+            }
+            if (!strcmp(nm, "cli"))   { EMIT(0xFA); break; }
+            if (!strcmp(nm, "sti"))   { EMIT(0xFB); break; }
+            if (!strcmp(nm, "hlt"))   { EMIT(0xF4); break; }
+            if (!strcmp(nm, "iretq")) { EMIT(0x48, 0xCF); break; }
+            if (!strcmp(nm, "lgdt") || !strcmp(nm, "lidt") || !strcmp(nm, "mov_cr3")) {
+                if (ac != 1) die("intrinsic needs 1 argument", n->line);
+                gen_expr(n->data.call.args[0]);
+                if (!strcmp(nm, "lgdt")) EMIT(0x0F, 0x01, 0x10);        /* lgdt [rax] */
+                else if (!strcmp(nm, "lidt")) EMIT(0x0F, 0x01, 0x18);   /* lidt [rax] */
+                else EMIT(0x0F, 0x22, 0xD8);                            /* mov cr3,rax */
+                break;
+            }
+            if (!strcmp(nm, "inb") || !strcmp(nm, "inl")) {
+                if (ac != 1) die("inb(port)", n->line);
+                ASTNode *a = n->data.call.args[0];
+                if (a->type == NODE_NUMBER) { EMIT(0x66, 0xBA); emit_imm(a->data.number.value, 2); }
+                else { gen_expr(a); EMIT(0x66, 0x89, 0xC2); }           /* mov dx,ax */
+                if (nm[2] == 'l') EMIT(0xED);                           /* in eax,dx */
+                else { EMIT(0xEC); EMIT(0x0F, 0xB6, 0xC0); }            /* in al,dx; movzx */
+                break;
+            }
+            if (!strcmp(nm, "outb") || !strcmp(nm, "outl")) {
+                if (ac != 2) die("outb(port, value)", n->line);
+                ASTNode *pa = n->data.call.args[0];
+                gen_expr(n->data.call.args[1]);
+                EMIT(0x50);                                             /* push rax */
+                if (pa->type == NODE_NUMBER) { EMIT(0x66, 0xBA); emit_imm(pa->data.number.value, 2); }
+                else { gen_expr(pa); EMIT(0x66, 0x89, 0xC2); }          /* mov dx,ax */
+                EMIT(0x58);                                             /* pop rax */
+                EMIT(nm[3] == 'l' ? 0xEF : 0xEE);                       /* out dx,eax / out dx,al */
+                break;
+            }
+            {
+                int ri = -1;
+                for (int k = 0; k < (int)(sizeof RINAME / sizeof *RINAME); k++)
+                    if (!strcmp(nm, RINAME[k])) { ri = k; break; }
+                if (ri < 0) goto not_intrinsic;
+                if (ac != RINARG[ri]) die("intrinsic: wrong argument count", n->line);
+                long a0 = ac > 0 ? cval(n->data.call.args[0], n->line) : 0;
+                long a1 = ac > 1 ? cval(n->data.call.args[1], n->line) : 0;
+                switch (ri) {
+                case RI_MOVB:  EMIT(0xB0 + (a0 & 7), (uint8_t)a1); break;
+                case RI_MOVW:  EMIT(0xB8 + (a0 & 7)); emit_imm(a1, 2); break;
+                case RI_MOVL:  EMIT(0xB8 + (a0 & 7)); emit_imm(a1, 4); break;
+                case RI_MOVQ:  EMIT(0x48, 0xC7, 0xC0 + (a0 & 7)); emit_imm(a1, 4); break;
+                case RI_XORW:
+                case RI_XORL:  EMIT(0x31, 0xC0 | ((a0 & 7) << 3) | (a1 & 7)); break;
+                case RI_MOVSREG: EMIT(0x8E, 0xC0 | ((a0 & 7) << 3) | (a1 & 7)); break;
+                case RI_ORB:   EMIT(0x0C + (a0 & 7), (uint8_t)a1); break;
+                case RI_ORL:   EMIT(0x0D + (a0 & 7)); emit_imm(a1, 4); break;
+                case RI_INTN:  EMIT(0xCD, (uint8_t)a0); break;
+                case RI_INAL:  EMIT(0xE4, (uint8_t)a0); break;
+                case RI_OUTAL: EMIT(0xE6, (uint8_t)a0); break;
+                case RI_CRRD:  EMIT(0x0F, 0x20, 0xC0 | ((a0 & 7) << 3) | (a1 & 7)); break;
+                case RI_CRWR:  EMIT(0x0F, 0x22, 0xC0 | ((a0 & 7) << 3) | (a1 & 7)); break;
+                case RI_ST32:  EMIT(0xC7, 0x05); emit_imm(a0, 4); emit_imm(a1, 4); break;
+                case RI_CLD:   EMIT(0xFC); break;
+                case RI_RDMSR: EMIT(0x0F, 0x32); break;
+                case RI_WRMSR: EMIT(0x0F, 0x30); break;
+                case RI_REPMOVSQ: EMIT(0xF3, 0x48, 0xA5); break;
+                case RI_JMPRAX: EMIT(0xFF, 0xE0); break;
+                case RI_LABEL:
+                    if (!raw_mode) die("label() is only valid in @raw mode", n->line);
+                    if (a0 < 0 || a0 >= 64) die("raw label id out of range", n->line);
+                    rawlab[a0] = clen; rawlab_ok[a0] = 1;
+                    break;
+                case RI_JC:   EMIT(0x72, 0); raw_defer(0, (int)a0, clen - 1); break;
+                case RI_JMP:  EMIT(0xEB, 0); raw_defer(0, (int)a0, clen - 1); break;
+                case RI_LJMP16: EMIT(0xEA); raw_defer(1, (int)a1, clen); emit_imm(0, 2); emit_imm(a0, 2); break;
+                case RI_LJMP32: EMIT(0xEA); raw_defer(2, (int)a1, clen); emit_imm(0, 4); emit_imm(a0, 2); break;
+                case RI_LGDTAT: EMIT(0x0F, 0x01, 0x16); raw_defer(1, (int)a0, clen); emit_imm(0, 2); break;
+                case RI_GDTDESC: emit_imm(a1 - 1, 2); raw_defer(2, (int)a0, clen); emit_imm(0, 4); break;
+                }
+                break;
+            }
+        not_intrinsic:
+            if (!strcmp(nm, "syscall")) {
                 if (n->data.call.acount < 1 || n->data.call.args[0]->type != NODE_NUMBER)
                     die("syscall(nr, a, b, c)", n->line);
                 long nr = n->data.call.args[0]->data.number.value;
@@ -1142,7 +1357,6 @@ static void gen_expr(ASTNode *n) {
             }
             int f = fn_find(n->data.call.name);
             if (f < 0) { fprintf(stderr, "error (line %d): unknown func %s\n", n->line, n->data.call.name); exit(1); }
-            int ac = n->data.call.acount;
             if (ac != FNS[f].params) {
                 fprintf(stderr, "error (line %d): %s expects %d args, got %d\n",
                         n->line, n->data.call.name, FNS[f].params, ac);
@@ -1208,9 +1422,11 @@ static void gen_stmt(ASTNode *n) {
             break;
         }
         case NODE_PRINT:
+            if (freestanding && !boot_mode) die("print is unavailable in freestanding mode", n->line);
             gen_expr(n->data.print.value);    
             EMIT(0xE8);
-            emit_imm(-(clen + 4), 4);
+            if (boot_mode) emit_patch(0, printlab);
+            else emit_imm(-(clen + 4), 4);
             break;
         case NODE_BLOCK: {
             int sn = nloc, so = cur_off;
@@ -1367,63 +1583,20 @@ static void pick_glob_regs(ASTNode *root) {
     }
 }
 
-static void generate_code(ASTNode *root) {
-    clen = 0;
-    if (is_pe) emit_print_pe();
-    else emit_print_elf();
-    litlab = new_label();
-
-    for (int i = 0; i < root->data.block.count; i++) {
-        ASTNode *n = root->data.block.stmts[i];
-        if (n->type != NODE_LET) continue;
-        if (nglob >= (int)(sizeof GLOB / sizeof *GLOB)) die("too many globals", n->line);
-        GLOB[nglob] = (typeof(GLOB[0])){ n->data.let.name, n->data.let.ty, gsize, 0 };
-        gsize += ty_size(n->data.let.ty);
-        nglob++;
-    }
-    for (int i = 0; i < root->data.block.count; i++) {
-        ASTNode *f = root->data.block.stmts[i];
-        if (f->type != NODE_FUNCTION) continue;
-        if (nfn >= (int)(sizeof FNS / sizeof *FNS)) die("too many functions", f->line);
-        FNS[nfn] = (typeof(FNS[0])){ strdup(f->data.function.name), new_label(), f->data.function.pcount };
-        nfn++;
-    }
-
-    pick_glob_regs(root);
-    for (int i = 0; i < root->data.block.count; i++) {
-        ASTNode *f = root->data.block.stmts[i];
-        if (f->type != NODE_FUNCTION) continue;
-        put_label(FNS[fn_find(f->data.function.name)].lab);
-        int pp = emit_prologue();
-        nloc = 0; cur_off = 0; frame_min = 0;
-        if (f->data.function.pcount > 0) {
-            EMIT(0x48, 0x89, 0xF8);
-            int off = loc_add(f->data.function.params[0], &TY_INT)->off;
-            EMIT(0x48, 0x89); rbp_disp(0, off);
-        }
-        for (int k = 1; k < f->data.function.pcount; k++) {
-            int off = loc_add(f->data.function.params[k], &TY_INT)->off;
-            EMIT(0x48, 0x8B); rbp_disp(0, 16 + 8 * (k - 1));
-            EMIT(0x48, 0x89); rbp_disp(0, off);
-        }
-        gen_stmt(f->data.function.body);
-        EMIT(0xC9, 0xC3);
-        patch_prologue(pp);
-    }
-
-    put_label(new_label());
-    entry = clen;
-
+static void emit_entry(ASTNode *root) {
     for (int i = 0; i < nglob; i++)
         if (GLOB[i].reg) greg_zero(GLOB[i].reg);
-    const char *ARGVN[2] = { "argv1", "argv2" };
-    for (int i = 0; i < 2; i++) {
-        Glob *a = glob_find(ARGVN[i]);
-        if (!a) continue;
-        EMIT(0x48, 0x8B, 0x44, 0x24, (uint8_t)(0x10 + 8 * i));
-        if (a->reg) { greg_store_rax(a->reg); continue; }
-        EMIT(0x48, 0x89, 0x05);
-        emit_patch(2, a->off);
+    if (!freestanding) {
+        for (int i = 0; i < 8; i++) {
+            char nm[8];
+            sprintf(nm, "argv%d", i + 1);
+            Glob *a = glob_find(nm);
+            if (!a) continue;
+            EMIT(0x48, 0x8B, 0x44, 0x24, (uint8_t)(0x10 + 8 * i));
+            if (a->reg) { greg_store_rax(a->reg); continue; }
+            EMIT(0x48, 0x89, 0x05);
+            emit_patch(2, a->off);
+        }
     }
 
     int toplet = 0;
@@ -1452,10 +1625,11 @@ static void generate_code(ASTNode *root) {
         }
         gen_stmt(n);
     }
-    int mi = fn_find("main");
+    int mi = fn_find(entry_name ? entry_name : "main");
     if (mi >= 0) {
-        EMIT(0xE8); emit_patch(0, FNS[mi].lab);   /* call main */
-        if (is_pe) {
+        EMIT(0xE8); emit_patch(0, FNS[mi].lab);   /* call entry function */
+        if (freestanding) EMIT(0xEB, 0xFE);       /* jmp $ */
+        else if (is_pe) {
             EMIT(0x48, 0x89, 0xC1);               /* mov rcx, rax (exit code) */
             emit_call_iat(2);
         } else {
@@ -1463,6 +1637,8 @@ static void generate_code(ASTNode *root) {
             mov_rax_imm(60);
             EMIT(0x0F, 0x05);
         }
+    } else if (freestanding) {
+        EMIT(0xEB, 0xFE);
     } else if (is_pe) {
         EMIT(0x31, 0xC9);
         emit_call_iat(2);
@@ -1472,6 +1648,76 @@ static void generate_code(ASTNode *root) {
         EMIT(0x0F, 0x05);
     }
     if (toplet) patch_prologue(epp);
+}
+
+static void generate_code(ASTNode *root) {
+    int bin = (fmt == FMT_BIN);
+    clen = 0;
+    if (raw_mode) {
+        litlab = new_label();
+        for (int i = 0; i < root->data.block.count; i++) {
+            ASTNode *n = root->data.block.stmts[i];
+            if (n->type == NODE_FUNCTION) continue;
+            gen_stmt(n);
+        }
+        entry = 0;
+        put_label(litlab);
+        raw_apply();
+        apply_patches();
+        return;
+    }
+    if (!freestanding) { if (is_pe) emit_print_pe(); else emit_print_elf(); }
+    litlab = new_label();
+
+    for (int i = 0; i < root->data.block.count; i++) {
+        ASTNode *n = root->data.block.stmts[i];
+        if (n->type != NODE_LET) continue;
+        if (nglob >= (int)(sizeof GLOB / sizeof *GLOB)) die("too many globals", n->line);
+        GLOB[nglob] = (typeof(GLOB[0])){ n->data.let.name, n->data.let.ty, gsize, 0 };
+        gsize += ty_size(n->data.let.ty);
+        nglob++;
+    }
+    for (int i = 0; i < root->data.block.count; i++) {
+        ASTNode *f = root->data.block.stmts[i];
+        if (f->type != NODE_FUNCTION) continue;
+        if (nfn >= (int)(sizeof FNS / sizeof *FNS)) die("too many functions", f->line);
+        FNS[nfn] = (typeof(FNS[0])){ strdup(f->data.function.name), new_label(), f->data.function.pcount };
+        nfn++;
+    }
+
+    pick_glob_regs(root);
+
+    if (bin) { entry = clen; emit_entry(root); }
+
+    if (boot_mode) {
+        printlab = new_label();
+        put_label(printlab);
+        emit_print_bare();
+    }
+
+    for (int i = 0; i < root->data.block.count; i++) {
+        ASTNode *f = root->data.block.stmts[i];
+        if (f->type != NODE_FUNCTION) continue;
+        put_label(FNS[fn_find(f->data.function.name)].lab);
+        int pp = emit_prologue();
+        nloc = 0; cur_off = 0; frame_min = 0;
+        if (f->data.function.pcount > 0) {
+            EMIT(0x48, 0x89, 0xF8);
+            int off = loc_add(f->data.function.params[0], &TY_INT)->off;
+            EMIT(0x48, 0x89); rbp_disp(0, off);
+        }
+        for (int k = 1; k < f->data.function.pcount; k++) {
+            int off = loc_add(f->data.function.params[k], &TY_INT)->off;
+            EMIT(0x48, 0x8B); rbp_disp(0, 16 + 8 * (k - 1));
+            EMIT(0x48, 0x89); rbp_disp(0, off);
+        }
+        gen_stmt(f->data.function.body);
+        EMIT(0xC9, 0xC3);
+        patch_prologue(pp);
+    }
+
+    if (!bin) { entry = clen; emit_entry(root); }
+
     put_label(litlab);
     if (nlit) { memcpy(code + clen, LIT, nlit); clen += nlit; }
     pcb = (PE_SECT + 15) & ~15;
@@ -1492,7 +1738,7 @@ static void write_elf(const char *filename) {
     if (fd < 0) { perror("open"); exit(1); }
 
     const uint64_t hdr_size = sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr);
-    const uint64_t base = 0x400000;
+    const uint64_t base = (uint64_t)load_base;
 
     Elf64_Ehdr ehdr = {
         .e_ident = { 0x7f, 'E', 'L', 'F', 2, 1, 1 },
@@ -1520,6 +1766,76 @@ static void write_elf(const char *filename) {
     write(fd, &phdr, sizeof phdr);
     write(fd, code, clen);
     close(fd);
+}
+
+static const uint8_t BOOT_SEC[271] = {
+    0xfa, 0x31, 0xc0, 0x8e, 0xd8, 0x8e, 0xc0, 0x8e, 0xd0, 0xbc, 0x00, 0x7c,
+    0xb8, 0x00, 0x10, 0x8e, 0xc0, 0x31, 0xdb, 0xb4, 0x02, 0xb0, 0x10, 0xb5,
+    0x00, 0xb1, 0x02, 0xb6, 0x00, 0xcd, 0x13, 0x72, 0x18, 0xe4, 0x92, 0x0c,
+    0x02, 0xe6, 0x92, 0x0f, 0x01, 0x16, 0x09, 0x7d, 0x0f, 0x20, 0xc0, 0x0c,
+    0x01, 0x0f, 0x22, 0xc0, 0xea, 0x3c, 0x7c, 0x08, 0x00, 0xf4, 0xeb, 0xfd,
+    0xb8, 0x10, 0x00, 0x00, 0x00, 0x8e, 0xd8, 0x8e, 0xc0, 0x8e, 0xd0, 0xbc,
+    0x00, 0x7c, 0x00, 0x00, 0xc7, 0x05, 0x00, 0x10, 0x00, 0x00, 0x03, 0x20,
+    0x00, 0x00, 0xc7, 0x05, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xc7, 0x05, 0x00, 0x20, 0x00, 0x00, 0x03, 0x30, 0x00, 0x00, 0xc7, 0x05,
+    0x04, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc7, 0x05, 0x00, 0x30,
+    0x00, 0x00, 0x83, 0x00, 0x00, 0x00, 0xc7, 0x05, 0x04, 0x30, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x0f, 0x20, 0xe0, 0x0d, 0x20, 0x00, 0x00, 0x00,
+    0x0f, 0x22, 0xe0, 0xb8, 0x00, 0x10, 0x00, 0x00, 0x0f, 0x22, 0xd8, 0xb9,
+    0x80, 0x00, 0x00, 0xc0, 0x0f, 0x32, 0x0d, 0x00, 0x01, 0x00, 0x00, 0x0f,
+    0x30, 0x0f, 0x20, 0xc0, 0x0d, 0x01, 0x00, 0x00, 0x80, 0x0f, 0x22, 0xc0,
+    0xea, 0xbb, 0x7c, 0x00, 0x00, 0x18, 0x00, 0xb8, 0x10, 0x00, 0x00, 0x00,
+    0x8e, 0xd8, 0x8e, 0xc0, 0x8e, 0xd0, 0x48, 0xc7, 0xc4, 0x00, 0x00, 0x08,
+    0x00, 0xfc, 0xbe, 0x00, 0x00, 0x01, 0x00, 0xbf, 0x00, 0x00, 0x10, 0x00,
+    0xb9, 0x00, 0x04, 0x00, 0x00, 0xf3, 0x48, 0xa5, 0xb8, 0x00, 0x00, 0x10,
+    0x00, 0xff, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff,
+    0xff, 0x00, 0x00, 0x00, 0x9a, 0xcf, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00,
+    0x92, 0xcf, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x9a, 0xaf, 0x00, 0x31,
+    0xc0, 0x1f, 0x00, 0xe7, 0x7c, 0x00, 0x00
+};
+
+static void write_bin(const char *filename) {
+    int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0755);
+    if (fd < 0) { perror("open"); exit(1); }
+    if (boot_mode) {
+        static uint8_t z[8192];
+        if (clen + gsize > 8192) {
+            fprintf(stderr, "error: kernel image exceeds 8192 bytes (%d)\n", clen + gsize);
+            exit(1);
+        }
+        write(fd, BOOT_SEC, sizeof BOOT_SEC);
+        write(fd, z, 510 - (int)sizeof BOOT_SEC);
+        write(fd, "\x55\xAA", 2);
+        write(fd, code, clen);
+        if (gsize > 0) write(fd, z, gsize);
+        write(fd, z, 8192 - clen - gsize);
+        close(fd);
+        printf("  boot disk: 512-byte boot sector + %d bytes kernel (%d code + %d bss) = %d bytes\n",
+               clen + gsize, clen, gsize, 512 + 8192);
+        return;
+    }
+    if (raw_mode) {
+        static uint8_t z[512];
+        if (clen > 510) { fprintf(stderr, "error: raw boot sector exceeds 510 bytes (%d)\n", clen); exit(1); }
+        write(fd, code, clen);
+        if (clen < 510) write(fd, z, 510 - clen);
+        write(fd, "\x55\xAA", 2);
+        close(fd);
+        printf("  raw boot sector: %d bytes code + %d pad + 55 AA = 512\n", clen, 510 - clen);
+        return;
+    }
+    write(fd, code, clen);
+    if (gsize > 0) {
+        static uint8_t z[4096];
+        for (int left = gsize; left > 0; ) {
+            int n = left < (int)sizeof z ? left : (int)sizeof z;
+            write(fd, z, n);
+            left -= n;
+        }
+    }
+    close(fd);
+    printf("  flat binary: entry +0x%x, load 0x%llx, %d bytes (code %d + bss %d)\n",
+           entry, load_base, clen + gsize, clen, gsize);
 }
 
 static void put(uint8_t *p, uint64_t v, int n) { memcpy(p, &v, n); }
@@ -1583,22 +1899,40 @@ static void write_pe(const char *filename) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) { fprintf(stderr, "Usage: %s <source-file> [output-file]\n", argv[0]); return 1; }
-    const char *out = argc >= 3 ? argv[2] : "a.out";
+    int cli_fmt = -1, cli_free = -1, ai = 1;
+    long long cli_base = -1;
+    char *cli_entry = NULL;
+    for (; ai < argc; ai++) {
+        const char *a = argv[ai];
+        if (a[0] != '-' || !a[1]) break;
+        if (!strcmp(a, "-f") && ai + 1 < argc) {
+            const char *v = argv[++ai];
+            cli_fmt = !strcmp(v, "bin") ? FMT_BIN : !strcmp(v, "pe") ? FMT_PE : FMT_ELF;
+        } else if (!strcmp(a, "-b") && ai + 1 < argc) cli_base = strtoll(argv[++ai], 0, 0);
+        else if (!strcmp(a, "-e") && ai + 1 < argc) cli_entry = argv[++ai];
+        else if (!strcmp(a, "-r")) cli_free = 1;
+        else { fprintf(stderr, "unknown option: %s\n", a); return 1; }
+    }
+    if (ai >= argc) {
+        fprintf(stderr, "Usage: %s [-f elf|bin|pe] [-b base] [-e sym] [-r] <source-file> [output-file]\n", argv[0]);
+        return 1;
+    }
+    const char *srcfile = argv[ai];
+    const char *out = ai + 1 < argc ? argv[ai + 1] : "a.out";
     size_t ol = strlen(out);
-    is_pe = ol >= 4 && !memcmp(out + ol - 4, ".exe", 4);
+    fmt = ol >= 4 && !memcmp(out + ol - 4, ".exe", 4) ? FMT_PE : FMT_ELF;
 
-    FILE *sf = fopen(argv[1], "rb");
-    if (!sf) { perror(argv[1]); return 1; }
+    FILE *sf = fopen(srcfile, "rb");
+    if (!sf) { perror(srcfile); return 1; }
     fseek(sf, 0, SEEK_END);
     long size = ftell(sf);
     rewind(sf);
     char *src = malloc(size + 1);
-    if (!src || fread(src, 1, size, sf) != (size_t)size) { fprintf(stderr, "Cannot read %s\n", argv[1]); return 1; }
+    if (!src || fread(src, 1, size, sf) != (size_t)size) { fprintf(stderr, "Cannot read %s\n", srcfile); return 1; }
     src[size] = 0;
     fclose(sf);
 
-    printf("Compiling %s...\n", argv[1]);
+    printf("Compiling %s...\n", srcfile);
 
     Lexer lx = { src, 0, 1 };
     Token *tokens = NULL;
@@ -1612,9 +1946,23 @@ int main(int argc, char **argv) {
 
     Parser p = { tokens, tcnt, 0 };
     adv(&p);
-    generate_code(parse_program(&p));
-    if (is_pe) write_pe(out); else write_elf(out);
+    ASTNode *root = parse_program(&p);
 
-    printf("Generated %s (%s x86-64)\n", out, is_pe ? "PE32+" : "ELF");
+    if (cli_fmt >= 0) fmt = cli_fmt;
+    if (cli_base >= 0) load_base = cli_base;
+    if (cli_entry) entry_name = cli_entry;
+    if (cli_free >= 0) freestanding = cli_free;
+    if (raw_mode) { fmt = FMT_BIN; freestanding = 1; }
+    if (boot_mode) { fmt = FMT_BIN; freestanding = 1; load_base = 0x100000; }
+    if (fmt == FMT_BIN) freestanding = 1;
+    is_pe = fmt == FMT_PE;
+
+    generate_code(root);
+    if (fmt == FMT_BIN) write_bin(out);
+    else if (is_pe) write_pe(out);
+    else write_elf(out);
+
+    printf("Generated %s (%s x86-64)\n", out,
+           fmt == FMT_BIN ? "flat binary" : is_pe ? "PE32+" : "ELF");
     return 0;
 }
