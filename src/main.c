@@ -1959,15 +1959,21 @@ static void write_bin(const char *filename) {
             fprintf(stderr, "error: kernel image exceeds 8192 bytes (%d)\n", clen + gsize);
             exit(1);
         }
-        write(fd, BOOT_SEC, sizeof BOOT_SEC);
+        int kern = clen + gsize;
+        int sectors = (kern + 511) / 512;
+        uint8_t stage1[sizeof BOOT_SEC];
+        memcpy(stage1, BOOT_SEC, sizeof BOOT_SEC);
+        for (int i = 0; i + 3 < (int)sizeof stage1; i++)
+            if (stage1[i] == 0xB4 && stage1[i + 1] == 0x02 && stage1[i + 2] == 0xB0) { stage1[i + 3] = (uint8_t)sectors; break; }
+        write(fd, stage1, sizeof stage1);
         write(fd, z, 510 - (int)sizeof BOOT_SEC);
         write(fd, "\x55\xAA", 2);
         write(fd, code, clen);
         if (gsize > 0) write(fd, z, gsize);
-        write(fd, z, 8192 - clen - gsize);
+        write(fd, z, sectors * 512 - kern);
         close(fd);
-        printf("  boot disk: 512-byte boot sector + %d bytes kernel (%d code + %d bss) = %d bytes\n",
-               clen + gsize, clen, gsize, 512 + 8192);
+        printf("  boot disk: 512-byte boot sector + %d kernel sector(s) = %d bytes (%d code + %d bss)\n",
+               sectors, 512 + sectors * 512, clen, gsize);
         return;
     }
     if (raw_mode) {
