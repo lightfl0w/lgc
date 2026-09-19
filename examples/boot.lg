@@ -1,0 +1,89 @@
+@raw;
+const AX = 0;  const CX = 1;  const DX = 2;  const BX = 3;
+const SP = 4;  const BP = 5;  const SI = 6;  const DI = 7;
+const EAX = 0; const ECX = 1; const ESP = 4; const ESI = 6; const EDI = 7;
+
+const AL = 0; const CL = 1; const DL = 2; const BL = 3;
+const AH = 4; const CH = 5; const DH = 6; const BH = 7;
+
+const ES = 0; const CS = 1; const SS = 2; const DS = 3;
+
+const CR0 = 0; const CR3 = 3; const CR4 = 4;
+
+const L_ERR = 0; const L_PM32 = 1; const L_LM64 = 2; const L_GDT = 3; const L_DESC = 4;
+
+cli();
+xorw(AX, AX);
+movsreg(DS, AX); movsreg(ES, AX); movsreg(SS, AX);
+movw(SP, 0x7C00);
+movw(AX, 0x1000);
+movsreg(ES, AX);
+xorw(BX, BX);
+movb(AH, 2);
+movb(AL, 16);
+movb(CH, 0);
+movb(CL, 2);
+movb(DH, 0);
+int_n(0x13);
+jc(L_ERR);
+
+in_al(0x92);
+orb(AL, 2);
+out_al(0x92);
+lgdt_at(L_DESC);
+
+cr_read(CR0, EAX);
+orb(AL, 1);
+cr_write(CR0, EAX);
+ljmp16(0x08, L_PM32);
+
+label(L_ERR);
+hlt();
+jmp(L_ERR);
+
+label(L_PM32);
+movl(EAX, 0x10);
+movsreg(DS, EAX); movsreg(ES, EAX); movsreg(SS, EAX);
+movl(ESP, 0x7C00);
+
+store32(0x1000, 0x2003);  store32(0x1004, 0);
+store32(0x2000, 0x3003);  store32(0x2004, 0);
+store32(0x3000, 0x0083);  store32(0x3004, 0);
+
+cr_read(CR4, EAX);
+orl(EAX, 0x20);
+cr_write(CR4, EAX);
+movl(EAX, 0x1000);
+cr_write(CR3, EAX);
+
+movl(ECX, 0xC0000080);
+rdmsr();
+orl(EAX, 0x100);
+wrmsr();
+
+cr_read(CR0, EAX);
+orl(EAX, 0x80000001);
+cr_write(CR0, EAX);
+ljmp32(0x18, L_LM64);
+
+label(L_LM64);
+movl(EAX, 0x10);
+movsreg(DS, EAX); movsreg(ES, EAX); movsreg(SS, EAX);
+movq(ESP, 0x80000);
+cld();
+movl(ESI, 0x10000);
+movl(EDI, 0x100000);
+movl(ECX, 1024);
+rep_movsq();
+movl(EAX, 0x100000);
+jmp_rax();
+
+label(L_GDT);
+asm(
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xFF, 0xFF, 0x00, 0x00, 0x00, 0x9A, 0xCF, 0x00,
+    0xFF, 0xFF, 0x00, 0x00, 0x00, 0x92, 0xCF, 0x00,
+    0xFF, 0xFF, 0x00, 0x00, 0x00, 0x9A, 0xAF, 0x00
+);
+label(L_DESC);
+gdt_desc16(L_GDT, 32);

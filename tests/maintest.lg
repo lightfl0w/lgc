@@ -1,0 +1,8 @@
+func helper(n) {
+  return n * 2;
+}
+
+func main() {
+  print helper(21);
+  return 7;
+}

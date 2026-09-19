@@ -1,0 +1,12 @@
+let char* argv1;
+let char buf[8];
+func sum(a, b, c, d) { return a + b + c + d; }
+buf[0] = 0x41;
+buf[1] = 0x42;
+buf[2] = 0;
+print 0x10 + 0x20;
+print sum(1, 2, 3, 4);
+print buf[0] + buf[1];
+let char* p = buf;
+print p[1];
+if (argv1 == 0) { print 0; } else { print 1; }

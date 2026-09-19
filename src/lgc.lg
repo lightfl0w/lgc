@@ -11,45 +11,46 @@ const T_INT = 9;
 const T_CHAR = 10;
 const T_BREAK = 11;
 const T_CONTINUE = 12;
-const T_IDENT = 13;
-const T_NUM = 14;
-const T_STR = 15;
-const T_PLUS = 16;
-const T_MINUS = 17;
-const T_STAR = 18;
-const T_SLASH = 19;
-const T_AMP = 20;
-const T_PIPE = 21;
-const T_CARET = 22;
-const T_TILDE = 23;
-const T_SHL = 24;
-const T_SHR = 25;
-const T_LBR = 26;
-const T_RBR = 27;
-const T_SEMI = 28;
-const T_COMMA = 29;
-const T_LP = 30;
-const T_RP = 31;
-const T_LBRACE = 32;
-const T_RBRACE = 33;
-const T_ASSIGN = 34;
-const T_EQ = 35;
-const T_NE = 36;
-const T_LT = 37;
-const T_GT = 38;
-const T_LE = 39;
-const T_GE = 40;
-const T_CONST = 41;
-const T_ANDAND = 42;
-const T_OROR = 43;
-const T_NOT = 44;
-const T_PLUSEQ = 45;
-const T_MINUSEQ = 46;
-const T_STAREQ = 47;
-const T_SLASHEQ = 48;
-const T_MODEQ = 49;
-const T_PERCENT = 50;
-const T_AT = 51;
+const T_EXTERN = 13;
+const T_IDENT = 14;
+const T_NUM = 15;
+const T_STR = 16;
+const T_PLUS = 17;
+const T_MINUS = 18;
+const T_STAR = 19;
+const T_SLASH = 20;
+const T_AMP = 21;
+const T_PIPE = 22;
+const T_CARET = 23;
+const T_TILDE = 24;
+const T_SHL = 25;
+const T_SHR = 26;
+const T_LBR = 27;
+const T_RBR = 28;
+const T_SEMI = 29;
+const T_COMMA = 30;
+const T_LP = 31;
+const T_RP = 32;
+const T_LBRACE = 33;
+const T_RBRACE = 34;
+const T_ASSIGN = 35;
+const T_EQ = 36;
+const T_NE = 37;
+const T_LT = 38;
+const T_GT = 39;
+const T_LE = 40;
+const T_GE = 41;
+const T_CONST = 42;
+const T_ANDAND = 43;
+const T_OROR = 44;
+const T_NOT = 45;
+const T_PLUSEQ = 46;
+const T_MINUSEQ = 47;
+const T_STAREQ = 48;
+const T_SLASHEQ = 49;
+const T_MODEQ = 50;
+const T_PERCENT = 51;
+const T_AT = 52;
 
 const N_NUM = 1;
 const N_VAR = 2;
@@ -72,6 +73,8 @@ const N_NOT = 18;
 const N_BNOT = 19;
 const N_BREAK = 20;
 const N_CONTINUE = 21;
+const N_EXTF = 22;
+const N_EXTG = 23;
 
 const O_ADD = 0;
 const O_SUB = 1;
@@ -113,7 +116,7 @@ const BASE = 4194304;
 const HDRSZ = 120;
 const CODE_MAX = 130000;
 
-let char SRC[65536]; let int NSRC;
+let char SRC[262144]; let int NSRC;
 let char OUT[131072]; let int EP;
 let char STR[4096]; let int NSTR;
 let char NAM[8192]; let int NNAM;
@@ -125,7 +128,7 @@ let int GRN[256]; let int GTY[256]; let int GOF[256]; let int NGLB; let int GSZ;
 let int LBP[2048]; let int NLAB;
 let int PTP[8192]; let int PTV[8192]; let int PTG[8192]; let int NPT;
 let int CNN[256]; let int CNV[256]; let int NCN;
-let int KWT[12]; let int BINP[64]; let int P1[128]; let int P2[128];
+let int KWT[13]; let int BINP[64]; let int P1[128]; let int P2[128];
 let int BRL[64]; let int CTL[64]; let int NLOOP;
 let int PST; let int LN; let int SRCI; let int CUROFF;
 let int LITLAB; let int PRINTL; let int ENTRY; let int ROOT; let int SYSP; let int CNAME; let int A1N; let int A2N;
@@ -134,7 +137,7 @@ let int T1; let int T2; let int CH; let int NX; let int FD; let char* OUTN;
 let char* argv1; let char* argv2; let char* argv3; let char* argv4;
 let char* argv5; let char* argv6; let char* argv7; let char* argv8;
 let int FMT; let int LOADBASE; let int ENTN; let int FREE;
-let int SRCARG; let int OUTARG;
+let int OUTARG;
 let int AVN[8]; let char NB[8];
 let int DBN; let int DEN; let int DBIN; let int DELF; let int DNORT;
 let int ASMN; let int CLIN; let int STIN; let int HLTN; let int IRQN;
@@ -145,6 +148,8 @@ let int BW[67];
 let int RINM[32]; let int RIA[32];
 let int RLAB[64]; let int RLOK[64];
 let int RPP[128]; let int RPK[128]; let int RPI[128]; let int NRPT;
+let char PB[16384]; let int NPB;
+let int IMPN; let int IMPF[64]; let int NIMF;
 
 
 func mod(a, b) { return a - a / b * b; }
@@ -285,7 +290,7 @@ func lexone() {
         SRCI = SRCI + 1;
         while ((SRCI < NSRC) && (alpha(SRC[SRCI]) || digit(SRC[SRCI]))) SRCI = SRCI + 1;
         t = T_IDENT;
-        while (k < 12) {
+        while (k < 13) {
             if (spmatch(s, SRCI, KWT[k])) t = k + 1;
             k = k + 1;
         }
@@ -351,10 +356,95 @@ func lexone() {
     return 0;
 }
 
-func lex() {
-    LN = 1;
-    while (SRCI < NSRC) lexone();
-    addtok(T_EOF, 0);
+func pbcat(dst, p) {
+    while (pchr(p, 0)) { PB[dst] = pchr(p, 0); dst = dst + 1; p = p + 1; }
+    return dst;
+}
+
+func makedir(p) {
+    let int o = NPB;
+    let int q = 0;
+    let int i = 0;
+    let int last = -1;
+    while (pchr(p, i)) {
+        if (pchr(p, i) == 47) last = i;
+        i = i + 1;
+    }
+    if (last < 0) { PB[NPB] = 46; NPB = NPB + 1; PB[NPB] = 0; NPB = NPB + 1; return o; }
+    q = 0;
+    while (q < last) { PB[NPB] = pchr(p, q); NPB = NPB + 1; q = q + 1; }
+    PB[NPB] = 0; NPB = NPB + 1;
+    return o;
+}
+
+func mkpath(dirp, namep) {
+    let int o = NPB;
+    let int q = o;
+    q = pbcat(q, dirp);
+    PB[q] = 47; q = q + 1;
+    q = pbcat(q, namep);
+    PB[q] = 0;
+    NPB = q + 1;
+    return o;
+}
+
+func impmark(p) {
+    if (NIMF >= 64) die(0, "too many imports");
+    IMPF[NIMF] = intern(p);
+    NIMF = NIMF + 1;
+}
+
+func impseen(p) {
+    let int k = intern(p);
+    let int i = 0;
+    while (i < NIMF) {
+        if (IMPF[i] == k) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+func import_at() {
+    if (NTOK < 4) return 0;
+    if (TKT[NTOK - 4] != T_AT) return 0;
+    if (TKT[NTOK - 3] != T_IDENT) return 0;
+    if (TVL[NTOK - 3] != IMPN) return 0;
+    if (TKT[NTOK - 2] != T_STR) return 0;
+    if (TKT[NTOK - 1] != T_SEMI) return 0;
+    return 1;
+}
+
+func loadfile(fn) {
+    let int st = 0;
+    let int en = 0;
+    let int dir = 0;
+    let int full = 0;
+    let int save_srci = 0;
+    let int save_ln = 0;
+    st = NSRC;
+    FD = syscall(SYS_OPEN, fn, 0, 0);
+    if (FD < 0) die(0, "cannot open input");
+    NSRC = NSRC + syscall(SYS_READ, FD, &SRC[NSRC], 65534);
+    syscall(SYS_CLOSE, FD, 0, 0);
+    en = NSRC;
+    SRC[en] = 0;
+    NSRC = en + 1;
+    dir = makedir(fn);
+    save_srci = SRCI; save_ln = LN;
+    SRCI = st; LN = 1;
+    while (SRCI < en) {
+        lexone();
+        if (import_at()) {
+            full = mkpath(&PB[dir], &STR[TVL[NTOK - 2]]);
+            NTOK = NTOK - 4;
+            if (impseen(&PB[full]) == 0) {
+                impmark(&PB[full]);
+                loadfile(&PB[full]);
+            }
+        }
+    }
+    SRCI = save_srci; LN = save_ln;
+    return 0;
 }
 
 
@@ -485,6 +575,7 @@ func exprn() {
 
 func stmt() {
     let int n = 0;
+    let int pc = 0;
     let int t = tk();
     if (t == T_CONST) {
         PST = PST + 1;
@@ -541,6 +632,32 @@ func stmt() {
         while ((tk() != T_RBRACE) && (tk() != T_EOF)) n = append(n, stmt());
         eat(T_RBRACE, "expected }");
         return nd(N_BLOCK, n, 0, 0);
+    }
+    if (t == T_EXTERN) {
+        PST = PST + 1;
+        if (tk() == T_FUNC) {
+            PST = PST + 1;
+            eat(T_IDENT, "extern func name");
+            n = nd(N_EXTF, 0, 0, TVL[PST - 1]);
+            eat(T_LP, "expected (");
+            if (tk() != T_RP) {
+                eat(T_IDENT, "param name");
+                pc = 1;
+                while (tk() == T_COMMA) { PST = PST + 1; eat(T_IDENT, "param name"); pc = pc + 1; }
+            }
+            eat(T_RP, "expected )");
+            NBB[n] = pc;
+            eat(T_SEMI, "expected ;");
+            return n;
+        }
+        if (tk() == T_LET) {
+            PST = PST + 1;
+            eat(T_IDENT, "extern let name");
+            n = nd(N_EXTG, 0, 0, TVL[PST - 1]);
+            eat(T_SEMI, "expected ;");
+            return n;
+        }
+        die(TLN[PST], "expected func or let after extern");
     }
     if (t == T_FUNC) die(TLN[PST], "func must be top-level");
     n = exprn();
@@ -1257,7 +1374,7 @@ func emit_entry() {
     NVAR = 0; CUROFF = 0;
     i = NAA[ROOT];
     while (i) {
-        if (NTY[i] != N_FUN) {
+        if ((NTY[i] != N_FUN) && (NTY[i] != N_EXTF) && (NTY[i] != N_EXTG)) {
             g = findglob(NVV[i]);
             if ((NTY[i] == N_LET) && (g >= 0)) {
                 if (NAA[i]) {
@@ -1304,7 +1421,7 @@ func generate() {
         LITLAB = lab_new();
         i = NAA[ROOT];
         while (i) {
-            if (NTY[i] != N_FUN) gen_stmt(i);
+            if ((NTY[i] != N_FUN) && (NTY[i] != N_EXTF) && (NTY[i] != N_EXTG)) gen_stmt(i);
             i = NNX[i];
         }
         ENTRY = 0;
@@ -1336,6 +1453,18 @@ func generate() {
             while (p) { pc = pc + 1; p = NNX[p]; }
             FRP[NFN] = pc;
             NFN = NFN + 1;
+        }
+        i = NNX[i];
+    }
+    i = NAA[ROOT];
+    while (i) {
+        if (NTY[i] == N_EXTF) {
+            f = findfun(NVV[i]);
+            if (f < 0) die(0, "extern func has no definition");
+            if (FRP[f] != NBB[i]) die(0, "extern func arity mismatch");
+        }
+        if (NTY[i] == N_EXTG) {
+            if (findglob(NVV[i]) < 0) die(0, "extern let has no definition");
         }
         i = NNX[i];
     }
@@ -1392,14 +1521,6 @@ func generate() {
     while (i < NSTR) { OUT[HDR + EP + i] = STR[i]; i = i + 1; }
 }
 
-
-func readsrc(fn) {
-    FD = syscall(SYS_OPEN, fn, 0, 0);
-    if (FD < 0) die(0, "cannot open input");
-    NSRC = syscall(SYS_READ, FD, SRC, 65535);
-    syscall(SYS_CLOSE, FD, 0, 0);
-    SRC[NSRC] = 0;
-}
 
 func writeout() {
     let int flen = 0;
@@ -1519,6 +1640,8 @@ func main() {
     let int cent = 0;
     let int cfree = -1;
     let int i = 0;
+    let int npos = 0;
+    let int si = 0;
     KWT[0] = intern("let");
     KWT[1] = intern("print");
     KWT[2] = intern("if");
@@ -1531,6 +1654,8 @@ func main() {
     KWT[9] = intern("char");
     KWT[10] = intern("break");
     KWT[11] = intern("continue");
+    KWT[12] = intern("extern");
+    IMPN = intern("import");
     P1['+'] = T_PLUS; P1['-'] = T_MINUS; P1['*'] = T_STAR; P1['/'] = T_SLASH; P1['&'] = T_AMP;
     P1['%'] = T_PERCENT; P1['!'] = T_NOT;
     P1['['] = T_LBR; P1[']'] = T_RBR; P1[';'] = T_SEMI; P1[','] = T_COMMA; P1['('] = T_LP; P1[')'] = T_RP;
@@ -1572,7 +1697,7 @@ func main() {
     ENTN = intern("main");
     LOADBASE = 4194304;
     NND = 1;
-    if (argv1 == 0) die(0, "usage: lgc [-f elf|bin] [-b base] [-e sym] [-r] <src.lg> [out]");
+    if (argv1 == 0) die(0, "usage: lgc [-f elf|bin] [-b base] [-e sym] [-r] <src.lg>... [out]");
     ai = 0;
     while ((ai < 8) && (argi(ai) != 0) && (pchr(argi(ai), 0) == 45)) {
         if (scmp(argi(ai), "-f")) {
@@ -1593,12 +1718,22 @@ func main() {
         else die(0, "unknown option");
         ai = ai + 1;
     }
-    SRCARG = argi(ai);
-    if (SRCARG == 0) die(0, "usage: lgc [-f elf|bin] [-b base] [-e sym] [-r] <src.lg> [out]");
-    OUTARG = argi(ai + 1);
-    if (OUTARG == 0) OUTARG = "a.out";
-    readsrc(SRCARG);
-    lex();
+    if (argi(ai) == 0) die(0, "usage: lgc [-f elf|bin] [-b base] [-e sym] [-r] <src.lg>... [out]");
+    npos = 0;
+    while (argi(ai + npos)) npos = npos + 1;
+    if (npos >= 2) {
+        OUTARG = argi(ai + npos - 1);
+        si = ai;
+        while (si < ai + npos - 1) {
+            if (impseen(argi(si)) == 0) { impmark(argi(si)); loadfile(argi(si)); }
+            si = si + 1;
+        }
+    } else {
+        OUTARG = "a.out";
+        impmark(argi(ai));
+        loadfile(argi(ai));
+    }
+    addtok(T_EOF, 0);
     ROOT = program();
     if (cfmt >= 0) FMT = cfmt;
     if (cbase >= 0) LOADBASE = cbase;

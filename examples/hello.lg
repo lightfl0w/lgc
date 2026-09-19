@@ -1,0 +1,20 @@
+@boot;
+
+let char* vid = 0xB8000;
+let int pos = 0;
+
+func putc(ch) {
+    vid[pos * 2] = ch;
+    vid[pos * 2 + 1] = 7;
+    pos = pos + 1;
+    return 0;
+}
+
+func main() {
+    putc('O');
+    putc('K');
+    print 42;
+    print 20 + 22;
+    while (1) { }
+    return 0;
+}

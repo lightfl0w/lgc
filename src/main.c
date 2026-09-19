@@ -54,7 +54,7 @@ static void die(const char *msg, int line) {
 
 typedef enum {
     TOK_LET, TOK_PRINT, TOK_IF, TOK_ELSE, TOK_WHILE, TOK_RETURN, TOK_FUNC,
-    TOK_SIZEOF, TOK_INT, TOK_CHAR, TOK_CONST, TOK_BREAK, TOK_CONTINUE,
+    TOK_SIZEOF, TOK_INT, TOK_CHAR, TOK_CONST, TOK_BREAK, TOK_CONTINUE, TOK_EXTERN,
     TOK_STR,
     TOK_IDENTIFIER, TOK_NUMBER,
     TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH,
@@ -77,7 +77,7 @@ static Token tok(TokenType t, const char *s, int len, int line) {
     return tk;
 }
 
-static const char *KWD[] = { "let", "print", "if", "else", "while", "return", "func", "sizeof", "int", "char", "const", "break", "continue" };
+static const char *KWD[] = { "let", "print", "if", "else", "while", "return", "func", "sizeof", "int", "char", "const", "break", "continue", "extern" };
 
 static const uint64_t PUNCT_BIT[2] = {
     (1ULL << 33) | (1ULL << 37) | (1ULL << 38) | (1ULL << 40) | (1ULL << 41) | (1ULL << 42) | (1ULL << 43) |
@@ -127,7 +127,7 @@ static Token next_token(Lexer *lx) {
     if (isalpha(c) || c == '_') {
         while (isalnum(lx->src[lx->pos]) || lx->src[lx->pos] == '_') lx->pos++;
         int len = lx->pos - s;
-        for (int i = 0; i < 13; i++)
+        for (int i = 0; i < 14; i++)
             if (len == (int)strlen(KWD[i]) && !memcmp(&lx->src[s], KWD[i], len))
                 return tok(TOK_LET + i, &lx->src[s], len, line);
         return tok(TOK_IDENTIFIER, &lx->src[s], len, line);
@@ -197,7 +197,7 @@ typedef enum {
     NODE_NUMBER, NODE_VARIABLE, NODE_BINARY, NODE_LET, NODE_PRINT,
     NODE_BLOCK, NODE_IF, NODE_WHILE, NODE_RETURN, NODE_FUNCTION, NODE_CALL,
     NODE_ADDR, NODE_DEREF, NODE_INDEX, NODE_ASSIGN, NODE_SIZEOF, NODE_STR, NODE_NOT,
-    NODE_BNOT, NODE_BREAK, NODE_CONTINUE
+    NODE_BNOT, NODE_BREAK, NODE_CONTINUE, NODE_EXTERN_FUNC, NODE_EXTERN_GLOB
 } NodeType;
 typedef enum { OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_EQ, OP_NE, OP_LT, OP_GT, OP_LE, OP_GE, OP_MOD, OP_AND, OP_OR,
                OP_BOR, OP_BAND, OP_BXOR, OP_SHL, OP_SHR } BinOp;
@@ -238,6 +238,8 @@ typedef struct ASTNode {
         struct { struct ASTNode *value; } unary;
         struct { struct ASTNode *base, *index; } index;
         struct { struct ASTNode *lhs, *rhs; int cop; } assign;
+        struct { char *name; int pcount; } extfn;
+        struct { char *name; } extgl;
         struct { int off, len; } str;
     } data;
 } ASTNode;
@@ -571,6 +573,39 @@ static ASTNode *parse_statement(Parser *p) {
             n->data.return_node.value = parse_expression(p);
             expect(p, TOK_SEMICOLON, "expected ';'");
             return n;
+        }
+        case TOK_EXTERN: {
+            adv(p);
+            if (p->cur.type == TOK_FUNC) {
+                adv(p);
+                if (p->cur.type != TOK_IDENTIFIER) die("expected extern func name", p->cur.line);
+                ASTNode *n = node(NODE_EXTERN_FUNC, t.line);
+                n->data.extfn.name = strdup(p->cur.text);
+                adv(p);
+                expect(p, TOK_LPAREN, "expected '('");
+                int pc = 0;
+                if (p->cur.type != TOK_RPAREN)
+                    do {
+                        if (p->cur.type != TOK_IDENTIFIER) die("expected param name", p->cur.line);
+                        pc++;
+                        adv(p);
+                    } while (p->cur.type == TOK_COMMA && (adv(p), 1));
+                expect(p, TOK_RPAREN, "expected ')'");
+                n->data.extfn.pcount = pc;
+                expect(p, TOK_SEMICOLON, "expected ';'");
+                return n;
+            }
+            if (p->cur.type == TOK_LET) {
+                adv(p);
+                if (p->cur.type != TOK_IDENTIFIER) die("expected extern let name", p->cur.line);
+                ASTNode *n = node(NODE_EXTERN_GLOB, t.line);
+                n->data.extgl.name = strdup(p->cur.text);
+                adv(p);
+                expect(p, TOK_SEMICOLON, "expected ';'");
+                return n;
+            }
+            die("expected 'func' or 'let' after extern", t.line);
+            return NULL;
         }
         case TOK_LBRACE: return parse_block(p);
         case TOK_FUNC:   die("func must be top-level", t.line);
@@ -1610,6 +1645,7 @@ static void emit_entry(ASTNode *root) {
     for (int i = 0; i < root->data.block.count; i++) {
         ASTNode *n = root->data.block.stmts[i];
         if (n->type == NODE_FUNCTION) continue;
+        if (n->type == NODE_EXTERN_FUNC || n->type == NODE_EXTERN_GLOB) continue;
         if (n->type == NODE_LET) {
             if (!n->data.let.value) continue;
             Glob *g = glob_find(n->data.let.name);
@@ -1658,6 +1694,7 @@ static void generate_code(ASTNode *root) {
         for (int i = 0; i < root->data.block.count; i++) {
             ASTNode *n = root->data.block.stmts[i];
             if (n->type == NODE_FUNCTION) continue;
+            if (n->type == NODE_EXTERN_FUNC || n->type == NODE_EXTERN_GLOB) continue;
             gen_stmt(n);
         }
         entry = 0;
@@ -1683,6 +1720,16 @@ static void generate_code(ASTNode *root) {
         if (nfn >= (int)(sizeof FNS / sizeof *FNS)) die("too many functions", f->line);
         FNS[nfn] = (typeof(FNS[0])){ strdup(f->data.function.name), new_label(), f->data.function.pcount };
         nfn++;
+    }
+    for (int i = 0; i < root->data.block.count; i++) {
+        ASTNode *n = root->data.block.stmts[i];
+        if (n->type == NODE_EXTERN_FUNC) {
+            int f = fn_find(n->data.extfn.name);
+            if (f < 0) die("extern func has no definition", n->line);
+            if (FNS[f].params != n->data.extfn.pcount) die("extern func arity mismatch", n->line);
+        } else if (n->type == NODE_EXTERN_GLOB) {
+            if (!glob_find(n->data.extgl.name)) die("extern let has no definition", n->line);
+        }
     }
 
     pick_glob_regs(root);
@@ -1898,6 +1945,74 @@ static void write_pe(const char *filename) {
     close(fd);
 }
 
+enum { MAX_IMPORT = 64 };
+static char IMPORTED[MAX_IMPORT][512];
+static int nimported;
+
+static int import_seen(const char *p) {
+    for (int i = 0; i < nimported; i++)
+        if (!strcmp(IMPORTED[i], p)) return 1;
+    return 0;
+}
+static void import_mark(const char *p) {
+    if (nimported >= MAX_IMPORT) die("too many imports", 0);
+    strncpy(IMPORTED[nimported], p, 511);
+    IMPORTED[nimported][511] = 0;
+    nimported++;
+}
+static void resolve_path(const char *cur, const char *name, char *out) {
+    if (name[0] == '/') { snprintf(out, 4096, "%s", name); return; }
+    const char *s = strrchr(cur, '/');
+    if (!s) snprintf(out, 4096, "%s", name);
+    else snprintf(out, 4096, "%.*s/%s", (int)(s - cur), cur, name);
+}
+
+static Token *lex_source(const char *path, int *out_n) {
+    FILE *sf = fopen(path, "rb");
+    if (!sf) { perror(path); exit(1); }
+    fseek(sf, 0, SEEK_END);
+    long size = ftell(sf);
+    rewind(sf);
+    char *src = malloc(size + 1);
+    if (!src || fread(src, 1, size, sf) != (size_t)size) { fprintf(stderr, "Cannot read %s\n", path); exit(1); }
+    src[size] = 0;
+    fclose(sf);
+    Lexer lx = { src, 0, 1 };
+    Token *tokens = NULL;
+    int tcnt = 0, tcap = 0;
+    Token tk;
+    do {
+        tk = next_token(&lx);
+        PUSH(tokens, tcnt, tcap, tk);
+    } while (tk.type != TOK_EOF && tk.type != TOK_ERROR);
+    if (tk.type == TOK_ERROR) { fprintf(stderr, "Lex error in %s\n", path); exit(1); }
+    free(src);
+    *out_n = tcnt;
+    return tokens;
+}
+
+static void load_tokens(const char *path, Token **tokens, int *tcnt, int *tcap) {
+    int n = 0;
+    Token *t = lex_source(path, &n);
+    for (int i = 0; i < n; i++) {
+        if (t[i].type == TOK_EOF) continue;
+        if (t[i].type == TOK_AT && i + 3 < n && t[i + 1].type == TOK_IDENTIFIER &&
+            !strcmp(t[i + 1].text, "import") && t[i + 2].type == TOK_STR &&
+            t[i + 3].type == TOK_SEMICOLON) {
+            const char *s = t[i + 2].text;
+            int len = (int)strlen(s);
+            char nm[512], full[4096];
+            if (len >= 2) snprintf(nm, sizeof nm, "%.*s", len - 2, s + 1);
+            else nm[0] = 0;
+            resolve_path(path, nm, full);
+            if (!import_seen(full)) { import_mark(full); load_tokens(full, tokens, tcnt, tcap); }
+            i += 3;
+            continue;
+        }
+        PUSH(*tokens, *tcnt, *tcap, t[i]);
+    }
+}
+
 int main(int argc, char **argv) {
     int cli_fmt = -1, cli_free = -1, ai = 1;
     long long cli_base = -1;
@@ -1914,35 +2029,24 @@ int main(int argc, char **argv) {
         else { fprintf(stderr, "unknown option: %s\n", a); return 1; }
     }
     if (ai >= argc) {
-        fprintf(stderr, "Usage: %s [-f elf|bin|pe] [-b base] [-e sym] [-r] <source-file> [output-file]\n", argv[0]);
+        fprintf(stderr, "Usage: %s [-f elf|bin|pe] [-b base] [-e sym] [-r] <source-file>... [output-file]\n", argv[0]);
         return 1;
     }
-    const char *srcfile = argv[ai];
-    const char *out = ai + 1 < argc ? argv[ai + 1] : "a.out";
+    int npos = argc - ai;
+    const char *out = npos >= 2 ? argv[argc - 1] : "a.out";
+    int nsrc = npos >= 2 ? npos - 1 : npos;
     size_t ol = strlen(out);
     fmt = ol >= 4 && !memcmp(out + ol - 4, ".exe", 4) ? FMT_PE : FMT_ELF;
 
-    FILE *sf = fopen(srcfile, "rb");
-    if (!sf) { perror(srcfile); return 1; }
-    fseek(sf, 0, SEEK_END);
-    long size = ftell(sf);
-    rewind(sf);
-    char *src = malloc(size + 1);
-    if (!src || fread(src, 1, size, sf) != (size_t)size) { fprintf(stderr, "Cannot read %s\n", srcfile); return 1; }
-    src[size] = 0;
-    fclose(sf);
-
-    printf("Compiling %s...\n", srcfile);
-
-    Lexer lx = { src, 0, 1 };
     Token *tokens = NULL;
     int tcnt = 0, tcap = 0;
-    Token tk;
-    do {
-        tk = next_token(&lx);
-        PUSH(tokens, tcnt, tcap, tk);
-    } while (tk.type != TOK_EOF && tk.type != TOK_ERROR);
-    if (tk.type == TOK_ERROR) { fprintf(stderr, "Lex error\n"); return 1; }
+    for (int i = 0; i < nsrc; i++) {
+        printf("Compiling %s...\n", argv[ai + i]);
+        if (import_seen(argv[ai + i])) continue;
+        import_mark(argv[ai + i]);
+        load_tokens(argv[ai + i], &tokens, &tcnt, &tcap);
+    }
+    PUSH(tokens, tcnt, tcap, tok(TOK_EOF, "", 0, 0));
 
     Parser p = { tokens, tcnt, 0 };
     adv(&p);

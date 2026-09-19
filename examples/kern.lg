@@ -1,0 +1,28 @@
+@nort;
+@base 0x100000;
+@entry _start;
+
+let char* vid = 0xB8000;
+let int ticks = 0;
+
+func putc(ch, pos) {
+    vid[pos * 2] = ch;
+    vid[pos * 2 + 1] = 7;
+    return 0;
+}
+
+func _start() {
+    cli();
+    asm(0xFA, 0xFB);
+    hlt();
+    lgdt(0x1000);
+    lidt(0x2000);
+    mov_cr3(0x3000);
+    outb(0x3F8, 72);
+    let int v = inb(0x3F8);
+    putc(65, 0);
+    ticks = ticks + 1;
+    sti();
+    iretq();
+    return v;
+}

@@ -1,7 +1,13 @@
 *
 !.gitignore
 !README.md
-!type.lg
-!fac.lg
-!main.c
-!lgc.lg
+!build.sh
+!src/
+!src/main.c
+!src/lgc.lg
+!tests/
+!tests/*.lg
+!examples/
+!examples/*.lg
+!reference/
+!reference/boot.bin
