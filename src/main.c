@@ -68,13 +68,15 @@ static unsigned sfnv(const char *s) {
 typedef enum {
     TOK_LET, TOK_PRINT, TOK_IF, TOK_ELSE, TOK_WHILE, TOK_RETURN, TOK_FUNC,
     TOK_SIZEOF, TOK_INT, TOK_CHAR, TOK_CONST, TOK_BREAK, TOK_CONTINUE, TOK_EXTERN,
+    TOK_FOR, TOK_SWITCH, TOK_CASE, TOK_DEFAULT, TOK_STRUCT,
+    TOK_DOT, TOK_ARROW,
     TOK_STR,
     TOK_IDENTIFIER, TOK_NUMBER,
     TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH,
     TOK_AMP, TOK_PIPE, TOK_CARET, TOK_TILDE, TOK_SHL, TOK_SHR,
     TOK_LBRACKET, TOK_RBRACKET,
     TOK_ASSIGN, TOK_EQ, TOK_NE, TOK_LT, TOK_GT, TOK_LE, TOK_GE,
-    TOK_SEMICOLON, TOK_COMMA,
+    TOK_SEMICOLON, TOK_COMMA, TOK_COLON,
     TOK_LPAREN, TOK_RPAREN, TOK_LBRACE, TOK_RBRACE,
     TOK_PERCENT, TOK_ANDAND, TOK_OROR,
     TOK_PLUS_EQ, TOK_MINUS_EQ, TOK_STAR_EQ, TOK_SLASH_EQ, TOK_PERCENT_EQ, TOK_NOT,
@@ -90,11 +92,11 @@ static Token tok(TokenType t, const char *s, int len, int line) {
     return tk;
 }
 
-static const char *KWD[] = { "let", "print", "if", "else", "while", "return", "func", "sizeof", "int", "char", "const", "break", "continue", "extern" };
+static const char *KWD[] = { "let", "print", "if", "else", "while", "return", "func", "sizeof", "int", "char", "const", "break", "continue", "extern", "for", "switch", "case", "default", "struct" };
 
 static const uint64_t PUNCT_BIT[2] = {
     (1ULL << 33) | (1ULL << 37) | (1ULL << 38) | (1ULL << 40) | (1ULL << 41) | (1ULL << 42) | (1ULL << 43) |
-    (1ULL << 44) | (1ULL << 45) | (1ULL << 47) | (1ULL << 59) |
+    (1ULL << 44) | (1ULL << 45) | (1ULL << 47) | (1ULL << 58) | (1ULL << 59) |
     (1ULL << 60) | (1ULL << 61) | (1ULL << 62),
     (1ULL << 27) | (1ULL << 29) | (1ULL << 30) | (1ULL << 59) | (1ULL << 60) | (1ULL << 61) | (1ULL << 62) |
     (1ULL << 0),
@@ -109,7 +111,7 @@ static const TokenType CHAR_TOK[128] = {
     ['+'] = TOK_PLUS, ['-'] = TOK_MINUS, ['*'] = TOK_STAR, ['/'] = TOK_SLASH,
     ['&'] = TOK_AMP, ['%'] = TOK_PERCENT,
     ['['] = TOK_LBRACKET, [']'] = TOK_RBRACKET,
-    [';'] = TOK_SEMICOLON, [','] = TOK_COMMA,
+    [';'] = TOK_SEMICOLON, [','] = TOK_COMMA, [':'] = TOK_COLON,
     ['('] = TOK_LPAREN, [')'] = TOK_RPAREN, ['{'] = TOK_LBRACE, ['}'] = TOK_RBRACE,
     ['='] = TOK_ASSIGN, ['!'] = TOK_NOT, ['<'] = TOK_LT, ['>'] = TOK_GT,
     ['|'] = TOK_PIPE, ['^'] = TOK_CARET, ['~'] = TOK_TILDE, ['@'] = TOK_AT,
@@ -140,7 +142,7 @@ static Token next_token(Lexer *lx) {
     if (isalpha(c) || c == '_') {
         while (isalnum(lx->src[lx->pos]) || lx->src[lx->pos] == '_') lx->pos++;
         int len = lx->pos - s;
-        for (int i = 0; i < 14; i++)
+        for (int i = 0; i < (int)(sizeof KWD / sizeof *KWD); i++)
             if (len == (int)strlen(KWD[i]) && !memcmp(&lx->src[s], KWD[i], len))
                 return tok(TOK_LET + i, &lx->src[s], len, line);
         return tok(TOK_IDENTIFIER, &lx->src[s], len, line);
@@ -192,6 +194,14 @@ static Token next_token(Lexer *lx) {
         lx->pos = s + 2;
         return tok(c == '<' ? TOK_SHL : TOK_SHR, &lx->src[s], 2, line);
     }
+    if (c == '-' && lx->src[s + 1] == '>') {
+        lx->pos = s + 2;
+        return tok(TOK_ARROW, &lx->src[s], 2, line);
+    }
+    if (c == '.') {
+        lx->pos = s + 1;
+        return tok(TOK_DOT, &lx->src[s], 1, line);
+    }
     lx->pos++;
     unsigned char uc = (unsigned char)c;
     if (uc >= 128 || !(PUNCT_BIT[uc >> 6] >> (uc & 63) & 1)) 
@@ -210,12 +220,14 @@ typedef enum {
     NODE_NUMBER, NODE_VARIABLE, NODE_BINARY, NODE_LET, NODE_PRINT,
     NODE_BLOCK, NODE_IF, NODE_WHILE, NODE_RETURN, NODE_FUNCTION, NODE_CALL,
     NODE_ADDR, NODE_DEREF, NODE_INDEX, NODE_ASSIGN, NODE_SIZEOF, NODE_STR, NODE_NOT,
-    NODE_BNOT, NODE_BREAK, NODE_CONTINUE, NODE_EXTERN_FUNC, NODE_EXTERN_GLOB
+    NODE_BNOT, NODE_BREAK, NODE_CONTINUE, NODE_EXTERN_FUNC, NODE_EXTERN_GLOB,
+    NODE_FOR, NODE_SWITCH, NODE_CASE, NODE_MEMBER, NODE_STRUCTDEF
 } NodeType;
 typedef enum { OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_EQ, OP_NE, OP_LT, OP_GT, OP_LE, OP_GE, OP_MOD, OP_AND, OP_OR,
                OP_BOR, OP_BAND, OP_BXOR, OP_SHL, OP_SHR } BinOp;
 
-typedef struct Type { uint8_t kind; int len; uint8_t sz; struct Type *base; } Type;
+typedef struct Type { uint8_t kind; int len; uint8_t sz; struct Type *base; struct Field *fields; int nfield; } Type;
+typedef struct Field { char *name; Type *ty; int off; } Field;
 
 static Type TY_INT = { 0, 0, 8, NULL }, TY_CHAR = { 0, 0, 1, NULL };
 static Type *ty_ptr(Type *b) {
@@ -230,8 +242,27 @@ static Type *ty_arr(int n, Type *b) {
     t[c] = (Type){ 2, n, 8, b };
     return &t[c++];
 }
-static int ty_size(Type *t) { return t->kind == 2 ? t->len * ty_size(t->base) : t->sz; }
+static int ty_size(Type *t) { return t->kind == 2 ? t->len * ty_size(t->base) : t->kind == 3 ? t->len : t->sz; }
 static int is_char(Type *t) { return t->kind == 0 && t->sz == 1; }
+
+#define STRUCT_MAX 128
+#define FIELD_MAX 1024
+static struct { char *name; Type *ty; } STRUCTS[STRUCT_MAX]; static int nstruct;
+static Field FIELDPOOL[FIELD_MAX]; static int nfieldpool;
+static Type *ty_rec(void) {
+    static Type t[256]; static int n;
+    if (n >= (int)(sizeof t / sizeof *t)) die("too many structs", 0);
+    t[n] = (Type){ 3, 0, 0, NULL, NULL, 0 };
+    return &t[n++];
+}
+static Type *struct_find(const char *name) {
+    for (int i = 0; i < nstruct; i++) if (!strcmp(STRUCTS[i].name, name)) return STRUCTS[i].ty;
+    return NULL;
+}
+static Field *struct_field(Type *st, const char *f) {
+    for (int i = 0; i < st->nfield; i++) if (!strcmp(st->fields[i].name, f)) return &st->fields[i];
+    return NULL;
+}
 
 typedef struct ASTNode {
     NodeType type;
@@ -241,7 +272,7 @@ typedef struct ASTNode {
         struct { char *name; } variable;
         struct { BinOp op; struct ASTNode *left, *right; } binary;
         struct { char *name; Type *ty; struct ASTNode *value; } let;
-        struct { struct ASTNode *value; } print;
+        struct { struct ASTNode **args; int ncount; } print;
         struct { struct ASTNode **stmts; int count, cap; } block;
         struct { struct ASTNode *cond, *then, *else_; } if_node;
         struct { struct ASTNode *cond, *body; } while_node;
@@ -254,6 +285,11 @@ typedef struct ASTNode {
         struct { char *name; int pcount; } extfn;
         struct { char *name; } extgl;
         struct { int off, len; } str;
+        struct { struct ASTNode *init, *cond, *inc, *body; } for_node;
+        struct { struct ASTNode *expr; struct ASTNode **arms; int narms; } switch_node;
+        struct { struct ASTNode *base; char *field; int arrow; } member;
+        struct { char *tag; struct ASTNode *body; } structdef;
+        struct { long val; int is_default; struct ASTNode *blk; } case_arm;
     } data;
 } ASTNode;
 
@@ -342,9 +378,18 @@ static ASTNode *parse_statement(Parser*);
 static ASTNode *parse_block(Parser*);
 
 static Type *parse_type(Parser *p) {
-    if (p->cur.type != TOK_INT && p->cur.type != TOK_CHAR) die("expected type", p->cur.line);
-    Type *t = p->cur.type == TOK_CHAR ? &TY_CHAR : &TY_INT;
-    adv(p);
+    Type *t;
+    if (p->cur.type == TOK_STRUCT) {
+        adv(p);
+        if (p->cur.type != TOK_IDENTIFIER) die("expected struct tag", p->cur.line);
+        t = struct_find(p->cur.text);
+        if (!t) die("undefined struct type", p->cur.line);
+        adv(p);
+    } else {
+        if (p->cur.type != TOK_INT && p->cur.type != TOK_CHAR) die("expected type", p->cur.line);
+        t = p->cur.type == TOK_CHAR ? &TY_CHAR : &TY_INT;
+        adv(p);
+    }
     for (;;) {
         if (p->cur.type == TOK_STAR) { adv(p); t = ty_ptr(t); }
         else if (p->cur.type == TOK_LBRACKET) {
@@ -425,14 +470,26 @@ static ASTNode *parse_primary(Parser *p) {
 
 static ASTNode *parse_postfix(Parser *p) {
     ASTNode *n = parse_primary(p);
-    while (p->cur.type == TOK_LBRACKET) {
-        int line = p->cur.line;
-        adv(p);
-        ASTNode *i = node(NODE_INDEX, line);
-        i->data.index.base = n;
-        i->data.index.index = parse_expression(p);
-        expect(p, TOK_RBRACKET, "expected ']'");
-        n = i;
+    for (;;) {
+        if (p->cur.type == TOK_LBRACKET) {
+            int line = p->cur.line;
+            adv(p);
+            ASTNode *i = node(NODE_INDEX, line);
+            i->data.index.base = n;
+            i->data.index.index = parse_expression(p);
+            expect(p, TOK_RBRACKET, "expected ']'");
+            n = i;
+        } else if (p->cur.type == TOK_DOT || p->cur.type == TOK_ARROW) {
+            int line = p->cur.line, arrow = p->cur.type == TOK_ARROW;
+            adv(p);
+            if (p->cur.type != TOK_IDENTIFIER) die("expected member name", p->cur.line);
+            ASTNode *m = node(NODE_MEMBER, line);
+            m->data.member.base = n;
+            m->data.member.field = p->cur.text;
+            m->data.member.arrow = arrow;
+            adv(p);
+            n = m;
+        } else break;
     }
     return n;
 }
@@ -530,7 +587,7 @@ static ASTNode *parse_statement(Parser *p) {
         case TOK_LET: {
             adv(p);
             Type *ty = &TY_INT;
-            if (p->cur.type == TOK_INT || p->cur.type == TOK_CHAR) ty = parse_type(p);
+            if (p->cur.type == TOK_INT || p->cur.type == TOK_CHAR || p->cur.type == TOK_STRUCT) ty = parse_type(p);
             if (p->cur.type != TOK_IDENTIFIER) die("expected var name", p->cur.line);
             ASTNode *n = node(NODE_LET, t.line);
             n->data.let.name = p->cur.text;
@@ -554,7 +611,11 @@ static ASTNode *parse_statement(Parser *p) {
         case TOK_PRINT: {
             adv(p);
             ASTNode *n = node(NODE_PRINT, t.line);
-            n->data.print.value = parse_expression(p);
+            ASTNode **args = NULL; int na = 0, acap = 0;
+            do { PUSH(args, na, acap, parse_expression(p)); }
+            while (p->cur.type == TOK_COMMA && (adv(p), 1));
+            n->data.print.args = args;
+            n->data.print.ncount = na;
             expect(p, TOK_SEMICOLON, "expected ';'");
             return n;
         }
@@ -575,6 +636,50 @@ static ASTNode *parse_statement(Parser *p) {
             n->data.while_node.cond = parse_expression(p);
             expect(p, TOK_RPAREN, "expected ')'");
             n->data.while_node.body = parse_statement(p);
+            return n;
+        }
+        case TOK_FOR: {
+            adv(p);
+            expect(p, TOK_LPAREN, "expected '('");
+            ASTNode *n = node(NODE_FOR, t.line);
+            if (p->cur.type == TOK_SEMICOLON) { adv(p); n->data.for_node.init = NULL; }
+            else n->data.for_node.init = parse_statement(p);
+            n->data.for_node.cond = (p->cur.type == TOK_SEMICOLON) ? NULL : parse_expression(p);
+            expect(p, TOK_SEMICOLON, "expected ';' in for");
+            n->data.for_node.inc = (p->cur.type == TOK_RPAREN) ? NULL : parse_expression(p);
+            expect(p, TOK_RPAREN, "expected ')'");
+            n->data.for_node.body = parse_statement(p);
+            return n;
+        }
+        case TOK_SWITCH: {
+            adv(p);
+            expect(p, TOK_LPAREN, "expected '('");
+            ASTNode *n = node(NODE_SWITCH, t.line);
+            n->data.switch_node.expr = parse_expression(p);
+            expect(p, TOK_RPAREN, "expected ')'");
+            expect(p, TOK_LBRACE, "expected '{'");
+            ASTNode **arms = NULL; int na = 0, acap = 0; ASTNode *cur = NULL;
+            while (p->cur.type != TOK_RBRACE && p->cur.type != TOK_EOF) {
+                if (p->cur.type == TOK_CASE || p->cur.type == TOK_DEFAULT) {
+                    cur = node(NODE_CASE, p->cur.line);
+                    cur->data.case_arm.blk = node(NODE_BLOCK, p->cur.line);
+                    PUSH(arms, na, acap, cur);
+                    if (p->cur.type == TOK_CASE) {
+                        adv(p);
+                        ASTNode *e = parse_expression(p);
+                        if (e->type != NODE_NUMBER) die("case value must be a constant", e->line);
+                        cur->data.case_arm.val = e->data.number.value;
+                    } else { cur->data.case_arm.is_default = 1; adv(p); }
+                    expect(p, TOK_COLON, "expected ':'");
+                } else {
+                    if (!cur) die("statement outside case label", p->cur.line);
+                    ASTNode *b = cur->data.case_arm.blk;
+                    PUSH(b->data.block.stmts, b->data.block.count, b->data.block.cap, parse_statement(p));
+                }
+            }
+            expect(p, TOK_RBRACE, "expected '}'");
+            n->data.switch_node.arms = arms;
+            n->data.switch_node.narms = na;
             return n;
         }
         case TOK_BREAK:
@@ -625,6 +730,36 @@ static ASTNode *parse_statement(Parser *p) {
             die("expected 'func' or 'let' after extern", t.line);
             return NULL;
         }
+        case TOK_STRUCT: {
+            adv(p);
+            if (p->cur.type != TOK_IDENTIFIER) die("expected struct tag", p->cur.line);
+            char *tag = p->cur.text;
+            adv(p);
+            expect(p, TOK_LBRACE, "expected '{'");
+            int base = nfieldpool, nf = 0, off = 0;
+            while (p->cur.type != TOK_RBRACE && p->cur.type != TOK_EOF) {
+                Type *ft = parse_type(p);
+                if (p->cur.type != TOK_IDENTIFIER) die("expected field name", p->cur.line);
+                char *fn = p->cur.text;
+                adv(p);
+                expect(p, TOK_SEMICOLON, "expected ';' after field");
+                int fsz = ty_size(ft);
+                int al = fsz >= 8 ? 8 : (fsz >= 4 ? 4 : (fsz >= 2 ? 2 : 1));
+                off = (off + al - 1) & ~(al - 1);
+                if (nfieldpool >= FIELD_MAX) die("too many struct fields", p->cur.line);
+                FIELDPOOL[nfieldpool++] = (Field){ fn, ft, off };
+                off += fsz; nf++;
+            }
+            expect(p, TOK_RBRACE, "expected '}'");
+            expect(p, TOK_SEMICOLON, "expected ';' after struct");
+            Type *st = ty_rec();
+            st->fields = &FIELDPOOL[base];
+            st->nfield = nf;
+            st->len = (off + 7) & ~7;
+            if (nstruct >= STRUCT_MAX) die("too many structs", t.line);
+            STRUCTS[nstruct].name = tag; STRUCTS[nstruct].ty = st; nstruct++;
+            return node(NODE_BLOCK, t.line);
+        }
         case TOK_LBRACE: return parse_block(p);
         case TOK_FUNC:   die("func must be top-level", t.line);
         default: {
@@ -667,6 +802,7 @@ static int raw_mode;
 static int boot_mode;
 static int bin_fmt;
 static int printlab;
+static int printstrlab;
 
 static void parse_directive(Parser *p) {
     int line = p->cur.line;
@@ -707,6 +843,7 @@ static int clen, entry, is_pe;
 static int lab_pos[8192], nlab = 1;
 static struct { int pos, lab, g; } PATCH[8192];   
 static uint8_t p_sz[8192];
+static int p_base[8192];
 static int npatch, litlab, pcb;
 
 enum {
@@ -855,7 +992,9 @@ static void apply_patches(void) {
         int64_t rel;
         if (PATCH[i].g == 0) t = lab_pos[PATCH[i].lab];
         else if (PATCH[i].g == 1) t = lab_pos[litlab] + PATCH[i].lab;
-        if (PATCH[i].g < 2) rel = t - (p + sz);
+        else if (PATCH[i].g == 3) t = lab_pos[PATCH[i].lab];
+        if (PATCH[i].g == 3) rel = t - lab_pos[p_base[i]];
+        else if (PATCH[i].g < 2) rel = t - (p + sz);
         else if (is_pe)
             rel = (int64_t)pcb + ((clen + 15) & ~15) + 176 + PATCH[i].lab - (pcb + p + 4);
         else {
@@ -1118,6 +1257,74 @@ static void emit_print_bare(void) {
     EMIT(0xC9,0xC3);                         /* leave; ret */
 }
 
+static void emit_print_str_elf(void) {
+    EMIT(0x48,0x89,0xC6);
+    EMIT(0x48,0x89,0xF2);
+    int scan = new_label();
+    put_label(scan);
+    EMIT(0x0F,0xB6,0x02);
+    EMIT(0x84,0xC0);
+    int done = new_label();
+    emit_jcc(0x84, done);
+    EMIT(0x48,0xFF,0xC2);
+    emit_jmp(scan);
+    put_label(done);
+    EMIT(0x48,0x29,0xF2);
+    EMIT(0x6A,0x01,0x58);
+    EMIT(0x6A,0x01,0x5F);
+    EMIT(0x0F,0x05);
+    EMIT(0xC3);
+}
+
+static void emit_print_str_pe(void) {
+    EMIT(0x55);
+    EMIT(0x48,0x89,0xE5);
+    EMIT(0x48,0x83,0xEC,0x50);
+    EMIT(0x48,0x89,0xC6);
+    EMIT(0x48,0x89,0xF2);
+    int scan = new_label();
+    put_label(scan);
+    EMIT(0x0F,0xB6,0x02);
+    EMIT(0x84,0xC0);
+    int done = new_label();
+    emit_jcc(0x84, done);
+    EMIT(0x48,0xFF,0xC2);
+    emit_jmp(scan);
+    put_label(done);
+    EMIT(0x48,0x29,0xF2);
+    EMIT(0x48,0x89,0xD7);
+    EMIT(0x6A,0xF5,0x59);
+    emit_call_iat(0);
+    EMIT(0x48,0x89,0xC1);
+    EMIT(0x48,0x89,0xF2);
+    EMIT(0x49,0x89,0xF8);
+    EMIT(0x4C,0x8D,0x4C,0x24,0x28);
+    EMIT(0x48,0xC7,0x44,0x24,0x20); emit_imm(0,4);
+    emit_call_iat(1);
+    EMIT(0xC9,0xC3);
+}
+
+static void emit_print_str_bare(void) {
+    EMIT(0x55);
+    EMIT(0x48,0x89,0xE5);
+    EMIT(0x48,0x83,0xEC,0x20);
+    EMIT(0x48,0x89,0xC6);
+    EMIT(0x66,0xBA,0xF8,0x03);
+    int oloop = new_label();
+    put_label(oloop);
+    EMIT(0x0F,0xB6,0x06);
+    EMIT(0x84,0xC0);
+    int done = new_label();
+    emit_jcc(0x84, done);
+    EMIT(0xEE);
+    EMIT(0x48,0xFF,0xC6);
+    emit_jmp(oloop);
+    put_label(done);
+    EMIT(0xB0,0x0A);
+    EMIT(0xEE);
+    EMIT(0xC9,0xC3);
+}
+
 static void gen_expr(ASTNode*);
 static void gen_stmt(ASTNode*);
 
@@ -1135,6 +1342,14 @@ static int ty_size_of_expr(ASTNode *n) {
     return 8;
 }
 
+static Type *ty_of_expr(ASTNode *n);
+static Type *struct_of(ASTNode *b, int arrow) {
+    Type *bt = ty_of_expr(b);
+    if (arrow) { if (bt->kind != 1) die("-> applied to non-pointer", b->line); bt = bt->base; }
+    if (!bt || bt->kind != 3) die("member access on non-struct", b->line);
+    return bt;
+}
+
 static Type *ty_of_expr(ASTNode *n) {
     switch (n->type) {
         case NODE_VARIABLE: {
@@ -1147,9 +1362,20 @@ static Type *ty_of_expr(ASTNode *n) {
         case NODE_DEREF:  return ty_of_expr(n->data.unary.value)->kind ? ty_of_expr(n->data.unary.value)->base : &TY_INT;
         case NODE_INDEX:  return ty_of_expr(n->data.index.base)->kind ? ty_of_expr(n->data.index.base)->base : &TY_INT;
         case NODE_ADDR:   return ty_ptr(ty_of_expr(n->data.unary.value));
+        case NODE_MEMBER: {
+            Type *st = struct_of(n->data.member.base, n->data.member.arrow);
+            Field *f = struct_field(st, n->data.member.field);
+            if (!f) die("no such field", n->line);
+            return f->ty;
+        }
         default:          return &TY_INT;
     }
 }
+
+static int is_str_ty(Type *t) {
+    return (t->kind == 1 || t->kind == 2) && is_char(t->base);
+}
+static int is_string_arg(ASTNode *e) { return is_str_ty(ty_of_expr(e)); }
 
 static void gen_addr(ASTNode *n) {
     switch (n->type) {
@@ -1176,6 +1402,19 @@ static void gen_addr(ASTNode *n) {
             if (es == 8) EMIT(0x48, 0xC1, 0xE0, 0x03);
             else if (es != 1) { EMIT(0x48, 0x69, 0xC0); emit_imm(es, 4); }
             EMIT(0x5B, 0x48, 0x01, 0xD8);
+            break;
+        }
+        case NODE_MEMBER: {
+            ASTNode *b = n->data.member.base;
+            int arrow = n->data.member.arrow;
+            Type *st = struct_of(b, arrow);
+            Field *f = struct_field(st, n->data.member.field);
+            if (!f) die("no such field", n->line);
+            if (arrow) gen_expr(b); else gen_addr(b);
+            if (f->off) {
+                if (f->off <= 127) EMIT(0x48, 0x83, 0xC0, (uint8_t)f->off);
+                else { EMIT(0x48, 0x05); emit_imm(f->off, 4); }
+            }
             break;
         }
         default:
@@ -1221,6 +1460,14 @@ static void gen_expr(ASTNode *n) {
             if (is_char(ty_of_expr(n))) EMIT(0x0F, 0xB6, 0x00);
             else EMIT(0x48, 0x8B, 0x00);
             break;
+        case NODE_MEMBER: {
+            Type *ft = ty_of_expr(n);
+            gen_addr(n);
+            if (ft->kind == 2 || ft->kind == 3) { }
+            else if (is_char(ft)) EMIT(0x0F, 0xB6, 0x00);
+            else EMIT(0x48, 0x8B, 0x00);
+            break;
+        }
         case NODE_ASSIGN: {
             int cop = n->data.assign.cop ? n->data.assign.cop - 1 : -1;
             ASTNode *lhs = n->data.assign.lhs;
@@ -1551,9 +1798,14 @@ static void gen_stmt(ASTNode *n) {
                 else {
                     Type *e = n->data.let.ty->base;
                     EMIT(0x48, 0x31, 0xC0);
-                    EMIT(0xB9); emit_imm(is_char(e) ? ty_size(n->data.let.ty) : ty_size(n->data.let.ty) / 8, 4);
+                    EMIT(0xB9);
+                    int esz = ty_size(e);
+                    int cnt = (e->kind == 3 && esz > 0) ? ty_size(n->data.let.ty) / esz : (is_char(e) ? ty_size(n->data.let.ty) : ty_size(n->data.let.ty) / 8);
+                    emit_imm(cnt, 4);
                     if (is_char(e)) EMIT(0xF3, 0xAA); else EMIT(0xF3, 0x48, 0xAB);
                 }
+            } else if (n->data.let.ty->kind == 3) {
+                if (n->data.let.value) die("cannot initialize struct in place", n->line);
             } else {
                 if (!n->data.let.value) die("missing initializer", n->line);
                 if (is_char(n->data.let.ty)) { EMIT(0x88); rbp_disp(0, l->off); }
@@ -1563,9 +1815,12 @@ static void gen_stmt(ASTNode *n) {
         }
         case NODE_PRINT:
             if (freestanding && !boot_mode) die("print is unavailable in freestanding mode", n->line);
-            gen_expr(n->data.print.value);    
-            EMIT(0xE8);
-            emit_patch(0, printlab);
+            for (int i = 0; i < n->data.print.ncount; i++) {
+                ASTNode *e = n->data.print.args[i];
+                gen_expr(e);
+                EMIT(0xE8);
+                emit_patch(0, is_string_arg(e) ? printstrlab : printlab);
+            }
             break;
         case NODE_BLOCK: {
             int sn = nloc, so = cur_off;
@@ -1600,6 +1855,86 @@ static void gen_stmt(ASTNode *n) {
             emit_jmp(lab_start);
             put_label(lab_end);
             nloop--;
+            break;
+        }
+        case NODE_FOR: {
+            if (nloop >= 64) die("loops too deep", n->line);
+            int sn = nloc, so = cur_off;
+            int lab_body = new_label(), lab_cont = new_label(), lab_test = new_label(), lab_end = new_label();
+            if (n->data.for_node.init) gen_stmt(n->data.for_node.init);
+            brk_lab[nloop] = lab_end; cont_lab[nloop] = lab_cont; nloop++;
+            emit_jmp(lab_test);
+            put_label(lab_body);
+            gen_stmt(n->data.for_node.body);
+            put_label(lab_cont);
+            if (n->data.for_node.inc) gen_expr(n->data.for_node.inc);
+            put_label(lab_test);
+            if (n->data.for_node.cond) { emit_jcc(gen_cond(n->data.for_node.cond), lab_end); emit_jmp(lab_body); }
+            else emit_jmp(lab_body);
+            put_label(lab_end);
+            nloop--;
+            nloc = sn; cur_off = so;
+            break;
+        }
+        case NODE_SWITCH: {
+            ASTNode **arms = n->data.switch_node.arms;
+            int na = n->data.switch_node.narms;
+            if (nloop >= 64) die("nesting too deep", n->line);
+            int sn = nloc, so = cur_off;
+            int lab_end = new_label(), def_lab = lab_end;
+            int alab[na > 0 ? na : 1];
+            int nc = 0; long lo = 0, hi = 0;
+            for (int k = 0; k < na; k++) {
+                alab[k] = new_label();
+                if (arms[k]->data.case_arm.is_default) def_lab = alab[k];
+                else { long v = arms[k]->data.case_arm.val; if (!nc) { lo = hi = v; } else { if (v < lo) lo = v; if (v > hi) hi = v; } nc++; }
+            }
+            long span = hi - lo;
+            int use_table = nc >= 4 && span <= 512 && span <= 4 * nc;
+            brk_lab[nloop] = lab_end; cont_lab[nloop] = lab_end; nloop++;
+            if (use_table) {
+                int tbl = new_label();
+                gen_expr(n->data.switch_node.expr);
+                EMIT(0x48, 0x89, 0xC7);
+                EMIT(0x48, 0x81, 0xEF); emit_imm(lo, 4);
+                EMIT(0x48, 0x81, 0xFF); emit_imm(span, 4);
+                emit_jcc(0x87, def_lab);
+                EMIT(0x48, 0x8D, 0x15); emit_patch(0, tbl);
+                EMIT(0x48, 0x63, 0x04, 0xBA);
+                EMIT(0x48, 0x01, 0xD0);
+                EMIT(0xFF, 0xE0);
+                for (int k = 0; k < na; k++) {
+                    put_label(alab[k]);
+                    ASTNode *b = arms[k]->data.case_arm.blk;
+                    for (int i = 0; i < b->data.block.count; i++) gen_stmt(b->data.block.stmts[i]);
+                }
+                emit_jmp(lab_end);
+                put_label(tbl);
+                for (long i = 0; i <= span; i++) {
+                    int t = def_lab;
+                    for (int k = 0; k < na; k++)
+                        if (!arms[k]->data.case_arm.is_default && arms[k]->data.case_arm.val == lo + i) { t = alab[k]; break; }
+                    int idx = npatch;
+                    emit_patch(3, t);
+                    p_base[idx] = tbl;
+                }
+            } else {
+                gen_expr(n->data.switch_node.expr);
+                for (int k = 0; k < na; k++) {
+                    if (arms[k]->data.case_arm.is_default) continue;
+                    emit_cmp_rax_imm(arms[k]->data.case_arm.val);
+                    emit_jcc(0x84, alab[k]);
+                }
+                emit_jmp(def_lab);
+                for (int k = 0; k < na; k++) {
+                    put_label(alab[k]);
+                    ASTNode *b = arms[k]->data.case_arm.blk;
+                    for (int i = 0; i < b->data.block.count; i++) gen_stmt(b->data.block.stmts[i]);
+                }
+            }
+            nloop--;
+            put_label(lab_end);
+            nloc = sn; cur_off = so;
             break;
         }
         case NODE_BREAK:
@@ -1643,6 +1978,12 @@ static int needs_frame(ASTNode *n) {
     }
     if (n->type == NODE_IF) return needs_frame(n->data.if_node.then) || needs_frame(n->data.if_node.else_);
     if (n->type == NODE_WHILE) return needs_frame(n->data.while_node.body);
+    if (n->type == NODE_FOR) return (n->data.for_node.init && needs_frame(n->data.for_node.init)) || needs_frame(n->data.for_node.body);
+    if (n->type == NODE_SWITCH) {
+        for (int i = 0; i < n->data.switch_node.narms; i++)
+            if (needs_frame(n->data.switch_node.arms[i]->data.case_arm.blk)) return 1;
+        return 0;
+    }
     return 0;
 }
 
@@ -1678,11 +2019,16 @@ static void scan_node(ASTNode *n, int w) {
             scan_node(n->data.assign.rhs, w);
             break;
         case NODE_LET:    scan_node(n->data.let.value, w); break;
-        case NODE_PRINT:  scan_node(n->data.print.value, w); break;
+        case NODE_PRINT:
+            for (int i = 0; i < n->data.print.ncount; i++) scan_node(n->data.print.args[i], w);
+            break;
         case NODE_RETURN: scan_node(n->data.return_node.value, w); break;
         case NODE_INDEX:
             scan_node(n->data.index.base, w);
             scan_node(n->data.index.index, w);
+            break;
+        case NODE_MEMBER:
+            scan_node(n->data.member.base, w);
             break;
         case NODE_CALL:
             for (int i = 0; i < n->data.call.acount; i++) scan_node(n->data.call.args[i], w);
@@ -1698,6 +2044,17 @@ static void scan_node(ASTNode *n, int w) {
         case NODE_WHILE:
             scan_node(n->data.while_node.cond, w * 8);
             scan_node(n->data.while_node.body, w * 8);
+            break;
+        case NODE_FOR:
+            scan_node(n->data.for_node.init, w);
+            scan_node(n->data.for_node.cond, w * 8);
+            scan_node(n->data.for_node.inc, w * 8);
+            scan_node(n->data.for_node.body, w * 8);
+            break;
+        case NODE_SWITCH:
+            scan_node(n->data.switch_node.expr, w);
+            for (int i = 0; i < n->data.switch_node.narms; i++)
+                scan_node(n->data.switch_node.arms[i]->data.case_arm.blk, w);
             break;
         case NODE_FUNCTION: scan_node(n->data.function.body, w); break;
         default: break;
@@ -1809,7 +2166,12 @@ static void generate_code(ASTNode *root) {
         apply_patches();
         return;
     }
-    if (!freestanding) { printlab = new_label(); put_label(printlab); if (is_pe) emit_print_pe(); else emit_print_elf(); }
+    if (!freestanding) {
+        printlab = new_label(); put_label(printlab);
+        if (is_pe) emit_print_pe(); else emit_print_elf();
+        printstrlab = new_label(); put_label(printstrlab);
+        if (is_pe) emit_print_str_pe(); else emit_print_str_elf();
+    }
     litlab = new_label();
 
     for (int i = 0; i < root->data.block.count; i++) {
@@ -1848,6 +2210,9 @@ static void generate_code(ASTNode *root) {
         printlab = new_label();
         put_label(printlab);
         emit_print_bare();
+        printstrlab = new_label();
+        put_label(printstrlab);
+        emit_print_str_bare();
     }
 
     for (int i = 0; i < root->data.block.count; i++) {
