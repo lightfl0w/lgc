@@ -68,7 +68,7 @@ static unsigned sfnv(const char *s) {
 typedef enum {
     TOK_LET, TOK_PRINT, TOK_IF, TOK_ELSE, TOK_WHILE, TOK_RETURN, TOK_FUNC,
     TOK_SIZEOF, TOK_INT, TOK_CHAR, TOK_CONST, TOK_BREAK, TOK_CONTINUE, TOK_EXTERN,
-    TOK_FOR, TOK_SWITCH, TOK_CASE, TOK_DEFAULT, TOK_STRUCT,
+    TOK_FOR, TOK_SWITCH, TOK_CASE, TOK_DEFAULT, TOK_STRUCT, TOK_ENUM,
     TOK_DOT, TOK_ARROW,
     TOK_STR,
     TOK_IDENTIFIER, TOK_NUMBER,
@@ -92,7 +92,7 @@ static Token tok(TokenType t, const char *s, int len, int line) {
     return tk;
 }
 
-static const char *KWD[] = { "let", "print", "if", "else", "while", "return", "func", "sizeof", "int", "char", "const", "break", "continue", "extern", "for", "switch", "case", "default", "struct" };
+static const char *KWD[] = { "let", "print", "if", "else", "while", "return", "func", "sizeof", "int", "char", "const", "break", "continue", "extern", "for", "switch", "case", "default", "struct", "enum" };
 
 static const uint64_t PUNCT_BIT[2] = {
     (1ULL << 33) | (1ULL << 37) | (1ULL << 38) | (1ULL << 40) | (1ULL << 41) | (1ULL << 42) | (1ULL << 43) |
@@ -758,6 +758,31 @@ static ASTNode *parse_statement(Parser *p) {
             st->len = (off + 7) & ~7;
             if (nstruct >= STRUCT_MAX) die("too many structs", t.line);
             STRUCTS[nstruct].name = tag; STRUCTS[nstruct].ty = st; nstruct++;
+            return node(NODE_BLOCK, t.line);
+        }
+        case TOK_ENUM: {
+            adv(p);
+            if (p->cur.type == TOK_IDENTIFIER) adv(p);
+            expect(p, TOK_LBRACE, "expected '{'");
+            long next = 0;
+            while (p->cur.type != TOK_RBRACE && p->cur.type != TOK_EOF) {
+                if (p->cur.type != TOK_IDENTIFIER) die("expected enum name", p->cur.line);
+                char *nm = p->cur.text;
+                adv(p);
+                long val = next;
+                if (p->cur.type == TOK_ASSIGN) {
+                    adv(p);
+                    ASTNode *e = parse_expression(p);
+                    if (e->type != NODE_NUMBER) die("enum value must be a constant", e->line);
+                    val = e->data.number.value;
+                }
+                if (p->cur.type == TOK_COMMA) adv(p);
+                if (nconst >= (int)(sizeof CONSTS / sizeof *CONSTS)) die("too many consts", p->cur.line);
+                CONSTS[nconst].name = nm; CONSTS[nconst].value = val; nconst++;
+                next = val + 1;
+            }
+            expect(p, TOK_RBRACE, "expected '}'");
+            if (p->cur.type == TOK_SEMICOLON) adv(p);
             return node(NODE_BLOCK, t.line);
         }
         case TOK_LBRACE: return parse_block(p);
