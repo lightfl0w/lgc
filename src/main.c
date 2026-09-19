@@ -55,7 +55,7 @@ static unsigned sfnv(const char *s) {
     while (*s) { h ^= (unsigned char)*s++; h *= 16777619u; }
     return h;
 }
-#define HSZ 128   
+#define HSZ 128
 
 #define PUSH(arr, n, cap, item) do {                                     \
     if ((n) >= (cap)) {                                                  \
@@ -706,6 +706,7 @@ static uint8_t code[262144];
 static int clen, entry, is_pe;
 static int lab_pos[8192], nlab = 1;
 static struct { int pos, lab, g; } PATCH[8192];   
+static uint8_t p_sz[8192];
 static int npatch, litlab, pcb;
 
 enum {
@@ -810,6 +811,7 @@ static void emit_patch(int g, int lab) {
     if (clen + 4 > (int)sizeof code || npatch >= (int)(sizeof PATCH / sizeof *PATCH))
         die("too many jumps", 0);
     PATCH[npatch] = (typeof(PATCH[0])){ clen, lab, g };
+    p_sz[npatch] = 4;
     npatch++;
     clen += 4;
 }
@@ -849,11 +851,11 @@ static void greg_zero(int r) { EMIT((uint8_t)(0x40 | ((r >= 8) << 2) | (r >= 8))
 
 static void apply_patches(void) {
     for (int i = 0; i < npatch; i++) {
-        int p = PATCH[i].pos, t = 0;
+        int p = PATCH[i].pos, t = 0, sz = p_sz[i];
         int64_t rel;
         if (PATCH[i].g == 0) t = lab_pos[PATCH[i].lab];
         else if (PATCH[i].g == 1) t = lab_pos[litlab] + PATCH[i].lab;
-        if (PATCH[i].g < 2) rel = t - (p + 4);
+        if (PATCH[i].g < 2) rel = t - (p + sz);
         else if (is_pe)
             rel = (int64_t)pcb + ((clen + 15) & ~15) + 176 + PATCH[i].lab - (pcb + p + 4);
         else {
@@ -861,8 +863,62 @@ static void apply_patches(void) {
             int64_t dva = 0x400000 + hdr + clen;
             rel = dva + PATCH[i].lab - (0x400000 + hdr + p + 4);
         }
-        *(int32_t *)(code + p) = (int32_t)rel;
+        if (sz == 1) code[p] = (uint8_t)(int8_t)rel;
+        else *(int32_t *)(code + p) = (int32_t)rel;
     }
+}
+
+static uint8_t sh_del[262144], sh_new[262144];
+static int sh_map[262144 + 1];
+static int sh_flag[8192], sh_kind[8192], sh_patch[8192], sh_nc;
+
+static void shrink_relayout(void) {
+    if (bin_fmt) return;
+    sh_nc = 0;
+    for (int i = 0; i < npatch; i++) {
+        if (PATCH[i].g != 0) continue;
+        int p = PATCH[i].pos;
+        sh_flag[i] = 0;
+        if (code[p - 1] == 0xE9) { sh_patch[sh_nc] = i; sh_kind[sh_nc] = 0; sh_nc++; }
+        else if (code[p - 2] == 0x0F && (code[p - 1] & 0xF0) == 0x80) { sh_patch[sh_nc] = i; sh_kind[sh_nc] = 1; sh_nc++; }
+    }
+    int oldlen = clen;
+    for (int iter = 0; iter < 64; iter++) {
+        memset(sh_del, 0, oldlen);
+        for (int k = 0; k < sh_nc; k++) {
+            if (!sh_flag[sh_patch[k]]) continue;
+            int p = PATCH[sh_patch[k]].pos;
+            if (sh_kind[k] == 1) sh_del[p - 1] = 1;
+            sh_del[p + 1] = sh_del[p + 2] = sh_del[p + 3] = 1;
+        }
+        int c = 0;
+        for (int x = 0; x <= oldlen; x++) { sh_map[x] = c; if (x < oldlen && !sh_del[x]) c++; }
+        int changed = 0;
+        for (int k = 0; k < sh_nc; k++) {
+            int i = sh_patch[k]; if (sh_flag[i]) continue;
+            int p = PATCH[i].pos;
+            int rel = sh_map[lab_pos[PATCH[i].lab]] - (sh_map[p] + 1);
+            if (rel >= -128 && rel <= 127) { sh_flag[i] = 1; changed = 1; }
+        }
+        if (!changed) break;
+    }
+    for (int k = 0; k < sh_nc; k++) {
+        int i = sh_patch[k]; if (!sh_flag[i]) continue;
+        int p = PATCH[i].pos;
+        if (sh_kind[k] == 0) code[p - 1] = 0xEB;
+        else code[p - 2] = (uint8_t)((code[p - 1] & 0x0F) | 0x70);
+    }
+    int w = 0;
+    for (int x = 0; x < oldlen; x++) if (!sh_del[x]) sh_new[w++] = code[x];
+    memcpy(code, sh_new, w);
+    for (int l = 0; l < nlab; l++) lab_pos[l] = sh_map[lab_pos[l]];
+    entry = sh_map[entry];
+    for (int i = 0; i < npatch; i++) {
+        PATCH[i].pos = sh_map[PATCH[i].pos];
+        if (PATCH[i].g == 0 && sh_flag[i]) p_sz[i] = 1;
+    }
+    for (int i = 0; i < niat; i++) IAT_PATCH[i] = (sh_map[IAT_PATCH[i] >> 2] << 2) | (IAT_PATCH[i] & 3);
+    clen = w;
 }
 
 typedef struct { char *name; Type *ty; int off; } Loc;
@@ -1509,8 +1565,7 @@ static void gen_stmt(ASTNode *n) {
             if (freestanding && !boot_mode) die("print is unavailable in freestanding mode", n->line);
             gen_expr(n->data.print.value);    
             EMIT(0xE8);
-            if (boot_mode) emit_patch(0, printlab);
-            else emit_imm(-(clen + 4), 4);
+            emit_patch(0, printlab);
             break;
         case NODE_BLOCK: {
             int sn = nloc, so = cur_off;
@@ -1754,7 +1809,7 @@ static void generate_code(ASTNode *root) {
         apply_patches();
         return;
     }
-    if (!freestanding) { if (is_pe) emit_print_pe(); else emit_print_elf(); }
+    if (!freestanding) { printlab = new_label(); put_label(printlab); if (is_pe) emit_print_pe(); else emit_print_elf(); }
     litlab = new_label();
 
     for (int i = 0; i < root->data.block.count; i++) {
@@ -1820,6 +1875,7 @@ static void generate_code(ASTNode *root) {
 
     put_label(litlab);
     if (nlit) { memcpy(code + clen, LIT, nlit); clen += nlit; }
+    shrink_relayout();
     pcb = (PE_SECT + 15) & ~15;
     if (is_pe) {
         apply_patches();
