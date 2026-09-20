@@ -68,7 +68,7 @@ static unsigned sfnv(const char *s) {
 typedef enum {
     TOK_LET, TOK_PRINT, TOK_IF, TOK_ELSE, TOK_WHILE, TOK_RETURN, TOK_FUNC,
     TOK_SIZEOF, TOK_INT, TOK_CHAR, TOK_CONST, TOK_BREAK, TOK_CONTINUE, TOK_EXTERN,
-    TOK_FOR, TOK_SWITCH, TOK_CASE, TOK_DEFAULT, TOK_STRUCT, TOK_ENUM,
+    TOK_FOR, TOK_SWITCH, TOK_CASE, TOK_DEFAULT, TOK_STRUCT, TOK_ENUM, TOK_NAKED,
     TOK_DOT, TOK_ARROW,
     TOK_STR,
     TOK_IDENTIFIER, TOK_NUMBER,
@@ -92,7 +92,7 @@ static Token tok(TokenType t, const char *s, int len, int line) {
     return tk;
 }
 
-static const char *KWD[] = { "let", "print", "if", "else", "while", "return", "func", "sizeof", "int", "char", "const", "break", "continue", "extern", "for", "switch", "case", "default", "struct", "enum" };
+static const char *KWD[] = { "let", "print", "if", "else", "while", "return", "func", "sizeof", "int", "char", "const", "break", "continue", "extern", "for", "switch", "case", "default", "struct", "enum", "naked" };
 
 static const uint64_t PUNCT_BIT[2] = {
     (1ULL << 33) | (1ULL << 37) | (1ULL << 38) | (1ULL << 40) | (1ULL << 41) | (1ULL << 42) | (1ULL << 43) |
@@ -277,7 +277,7 @@ typedef struct ASTNode {
         struct { struct ASTNode *cond, *then, *else_; } if_node;
         struct { struct ASTNode *cond, *body; } while_node;
         struct { struct ASTNode *value; } return_node;
-        struct { char *name; char **params; Type **ptypes; int pcount; struct ASTNode *body; } function;
+        struct { char *name; char **params; Type **ptypes; int pcount; int naked; struct ASTNode *body; } function;
         struct { char *name; struct ASTNode **args; int acount; } call;
         struct { struct ASTNode *value; } unary;
         struct { struct ASTNode *base, *index; } index;
@@ -795,12 +795,13 @@ static ASTNode *parse_statement(Parser *p) {
     }
 }
 
-static ASTNode *parse_function(Parser *p) {
+static ASTNode *parse_function(Parser *p, int naked) {
     int line = p->cur.line;
     adv(p);
     if (p->cur.type != TOK_IDENTIFIER) die("expected func name", p->cur.line);
     ASTNode *f = node(NODE_FUNCTION, line);
     f->data.function.name = p->cur.text;
+    f->data.function.naked = naked;
     adv(p);
     expect(p, TOK_LPAREN, "expected '('");
     char **params = NULL;
@@ -828,6 +829,7 @@ static int boot_mode;
 static int bin_fmt;
 static int printlab;
 static int printstrlab;
+static int cur_naked;
 
 static void parse_directive(Parser *p) {
     int line = p->cur.line;
@@ -857,8 +859,11 @@ static ASTNode *parse_program(Parser *p) {
     ASTNode *root = node(NODE_BLOCK, 0);
     while (p->cur.type != TOK_EOF) {
         if (p->cur.type == TOK_AT) { parse_directive(p); continue; }
+        int naked = 0;
+        if (p->cur.type == TOK_NAKED) { naked = 1; adv(p); }
+        if (naked && p->cur.type != TOK_FUNC) die("naked must precede func", p->cur.line);
         PUSH(root->data.block.stmts, root->data.block.count, root->data.block.cap,
-             p->cur.type == TOK_FUNC ? parse_function(p) : parse_statement(p));
+             p->cur.type == TOK_FUNC ? parse_function(p, naked) : parse_statement(p));
     }
     return root;
 }
@@ -1684,6 +1689,15 @@ static void gen_expr(ASTNode *n) {
                 else EMIT(0x0F, 0x22, 0xD8);                            /* mov cr3,rax */
                 break;
             }
+            if (!strcmp(nm, "addr")) {
+                if (ac != 1 || n->data.call.args[0]->type != NODE_VARIABLE)
+                    die("addr(funcname)", n->line);
+                int f = fn_find(n->data.call.args[0]->data.variable.name);
+                if (f < 0) die("addr: unknown function", n->line);
+                EMIT(0x48, 0x8D, 0x05);
+                emit_patch(0, FNS[f].lab);                              /* lea rax,[rip+f] */
+                break;
+            }
             if (!strcmp(nm, "inb") || !strcmp(nm, "inl")) {
                 if (ac != 1) die("inb(port)", n->line);
                 ASTNode *a = n->data.call.args[0];
@@ -1972,7 +1986,8 @@ static void gen_stmt(ASTNode *n) {
             break;
         case NODE_RETURN:
             gen_expr(n->data.return_node.value);
-            EMIT(0xC9, 0xC3);                  
+            if (cur_naked) EMIT(0xC3);
+            else EMIT(0xC9, 0xC3);
             break;
         default:
             gen_expr(n); 
@@ -2227,7 +2242,7 @@ static void generate_code(ASTNode *root) {
         }
     }
 
-    pick_glob_regs(root);
+    if (!freestanding) pick_glob_regs(root);
 
     if (bin_fmt) { entry = clen; emit_entry(root); }
 
@@ -2244,21 +2259,24 @@ static void generate_code(ASTNode *root) {
         ASTNode *f = root->data.block.stmts[i];
         if (f->type != NODE_FUNCTION) continue;
         put_label(FNS[fn_find(f->data.function.name)].lab);
-        int pp = emit_prologue();
+        int pp = -1;
+        cur_naked = f->data.function.naked;
+        if (!cur_naked) pp = emit_prologue();
         nloc = 0; cur_off = 0; frame_min = 0;
-        if (f->data.function.pcount > 0) {
+        if (f->data.function.pcount > 0 && !cur_naked) {
             EMIT(0x48, 0x89, 0xF8);
             int off = loc_add(f->data.function.params[0], &TY_INT)->off;
             EMIT(0x48, 0x89); rbp_disp(0, off);
         }
-        for (int k = 1; k < f->data.function.pcount; k++) {
-            int off = loc_add(f->data.function.params[k], &TY_INT)->off;
-            EMIT(0x48, 0x8B); rbp_disp(0, 16 + 8 * (k - 1));
-            EMIT(0x48, 0x89); rbp_disp(0, off);
-        }
+        if (f->data.function.pcount > 0 && !cur_naked)
+            for (int k = 1; k < f->data.function.pcount; k++) {
+                int off = loc_add(f->data.function.params[k], &TY_INT)->off;
+                EMIT(0x48, 0x8B); rbp_disp(0, 16 + 8 * (k - 1));
+                EMIT(0x48, 0x89); rbp_disp(0, off);
+            }
         gen_stmt(f->data.function.body);
-        EMIT(0xC9, 0xC3);
-        patch_prologue(pp);
+        if (!cur_naked) { EMIT(0xC9, 0xC3); patch_prologue(pp); }
+        cur_naked = 0;
     }
 
     if (!bin_fmt) { entry = clen; emit_entry(root); }
