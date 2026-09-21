@@ -1689,13 +1689,28 @@ static void gen_expr(ASTNode *n) {
                 else EMIT(0x0F, 0x22, 0xD8);                            /* mov cr3,rax */
                 break;
             }
-            if (!strcmp(nm, "addr")) {
+            if (!strcmp(nm, "addr") && fn_find(nm) < 0) {
                 if (ac != 1 || n->data.call.args[0]->type != NODE_VARIABLE)
                     die("addr(funcname)", n->line);
                 int f = fn_find(n->data.call.args[0]->data.variable.name);
                 if (f < 0) die("addr: unknown function", n->line);
                 EMIT(0x48, 0x8D, 0x05);
                 emit_patch(0, FNS[f].lab);                              /* lea rax,[rip+f] */
+                break;
+            }
+            if (!strcmp(nm, "ld32") && fn_find(nm) < 0) {
+                if (ac != 1) die("ld32(addr)", n->line);
+                gen_expr(n->data.call.args[0]);
+                EMIT(0x8B, 0x00);                                       /* mov eax,[rax] (zero-extends) */
+                break;
+            }
+            if (!strcmp(nm, "st32") && fn_find(nm) < 0) {
+                if (ac != 2) die("st32(addr, val)", n->line);
+                gen_expr(n->data.call.args[1]);
+                EMIT(0x50);                                             /* push rax (val) */
+                gen_expr(n->data.call.args[0]);                         /* rax = addr */
+                EMIT(0x59);                                             /* pop rcx (val) */
+                EMIT(0x89, 0x08);                                       /* mov [rax],ecx */
                 break;
             }
             if (!strcmp(nm, "inb") || !strcmp(nm, "inl")) {
