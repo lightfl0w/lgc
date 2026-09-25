@@ -51,6 +51,7 @@ const T_SLASHEQ = 49;
 const T_MODEQ = 50;
 const T_PERCENT = 51;
 const T_AT = 52;
+const T_FOR = 53;
 
 const N_NUM = 1;
 const N_VAR = 2;
@@ -75,6 +76,7 @@ const N_BREAK = 20;
 const N_CONTINUE = 21;
 const N_EXTF = 22;
 const N_EXTG = 23;
+const N_FOR = 24;
 
 const O_ADD = 0;
 const O_SUB = 1;
@@ -122,6 +124,7 @@ let char STR[4096]; let int NSTR;
 let char NAM[8192]; let int NNAM;
 let int TKT[32768]; let int TVL[32768]; let int TLN[32768]; let int NTOK;
 let int NTY[16384]; let int NAA[16384]; let int NBB[16384]; let int NVV[16384]; let int NNX[16384]; let int NND;
+let int N4[16384];   
 let int VRN[512]; let int VTY[512]; let int VOF[512]; let int NVAR;
 let int FRN[256]; let int FLB[256]; let int FRP[256]; let int NFN;
 let int GRN[256]; let int GTY[256]; let int GOF[256]; let int NGLB; let int GSZ;
@@ -131,7 +134,7 @@ let int CNN[256]; let int CNV[256]; let int NCN;
 let int KWT[13]; let int BINP[64]; let int P1[128]; let int P2[128];
 let int BRL[64]; let int CTL[64]; let int NLOOP;
 let int PST; let int LN; let int SRCI; let int CUROFF;
-let int LITLAB; let int PRINTL; let int ENTRY; let int ROOT; let int SYSP; let int CNAME; let int A1N; let int A2N;
+let int LITLAB; let int PRINTL; let int STRPRL; let int ENTRY; let int ROOT; let int SYSP; let int CNAME; let int FORN; let int A1N; let int A2N;
 let int HDR; let int SEG2;
 let int T1; let int T2; let int CH; let int NX; let int FD; let char* OUTN;
 let char* argv1; let char* argv2; let char* argv3; let char* argv4;
@@ -296,6 +299,7 @@ func lexone() {
             k = k + 1;
         }
         if ((t == T_IDENT) && spmatch(s, SRCI, CNAME)) t = T_CONST;
+        if ((t == T_IDENT) && spmatch(s, SRCI, FORN)) t = T_FOR;
         if (t == T_IDENT) v = internspan(s, SRCI);
         addtok(t, v);
         return 0;
@@ -452,7 +456,7 @@ func loadfile(fn) {
 func nd(t, a, b, v) {
     if (NND >= 16384) die(0, "node overflow");
     NTY[NND] = t; NAA[NND] = a; NBB[NND] = b; NVV[NND] = v;
-    NNX[NND] = 0;
+    NNX[NND] = 0; N4[NND] = 0;
     NND = NND + 1;
     return NND - 1;
 }
@@ -476,6 +480,7 @@ func esz(t) { return mod(t / W32, 256); }
 func kind(t) { return t / K_PTR; }
 func tsz(t) { return t - t / W32 * W32; }
 func ischar(t) { return (kind(t) == 0) && (esz(t) == 1); }
+func is_str_ty(t) { return (kind(t) == 1) && (esz(t) == 1); }   
 func tptr(b) { return K_PTR + esz(b) * W32 + 8; }
 func tarr(n, b) { return K_ARR + tsz(b) * W32 + n * tsz(b); }
 
@@ -577,6 +582,7 @@ func exprn() {
 func stmt() {
     let int n = 0;
     let int pc = 0;
+    let int i = 0;
     let int t = tk();
     if (t == T_CONST) {
         PST = PST + 1;
@@ -606,7 +612,20 @@ func stmt() {
         eat(T_SEMI, "expected ;");
         return n;
     }
-    if (t == T_PRINT) { PST = PST + 1; n = nd(N_PRINT, exprn(), 0, 0); eat(T_SEMI, "expected ;"); return n; }
+    if (t == T_PRINT) {
+        PST = PST + 1;
+        n = nd(N_PRINT, 0, 0, 0);
+        pc = 1;
+        i = exprn();
+        while (tk() == T_COMMA) {
+            PST = PST + 1;
+            i = append(i, exprn());
+            pc = pc + 1;
+        }
+        NAA[n] = i; NBB[n] = pc;
+        eat(T_SEMI, "expected ;");
+        return n;
+    }
     if (t == T_IF) {
         PST = PST + 1;
         eat(T_LP, "expected (");
@@ -622,6 +641,19 @@ func stmt() {
         n = nd(N_WHILE, exprn(), 0, 0);
         eat(T_RP, "expected )");
         NBB[n] = stmt();
+        return n;
+    }
+    if (t == T_FOR) {
+        PST = PST + 1;
+        eat(T_LP, "expected (");
+        n = nd(N_FOR, 0, 0, 0);
+        if (tk() != T_SEMI) NAA[n] = stmt();      
+        else PST = PST + 1;
+        if (tk() != T_SEMI) NBB[n] = exprn();     
+        eat(T_SEMI, "expected ;");
+        if (tk() != T_RP) NVV[n] = exprn();       
+        eat(T_RP, "expected )");
+        N4[n] = stmt();                           
         return n;
     }
     if (t == T_BREAK) { PST = PST + 1; eat(T_SEMI, "expected ;"); return nd(N_BREAK, 0, 0, 0); }
@@ -1279,6 +1311,10 @@ func gen_stmt(n) {
     let int i = 0;
     let int l1 = 0;
     let int l2 = 0;
+    let int l3 = 0;
+    let int l4 = 0;
+    let int sn = 0;
+    let int so = 0;
     if (t == N_BLOCK) {
         l1 = NVAR; l2 = CUROFF;
         i = NAA[n];
@@ -1306,8 +1342,15 @@ func gen_stmt(n) {
     }
     if (t == N_PRINT) {
         if (FREE && (BOOT == 0)) die(0, "print is unavailable in freestanding mode");
-        gen_expr(NAA[n]);
-        call_rel(PRINTL);
+        i = NAA[n];
+        while (i) {
+            gen_expr(i);
+            if (is_str_ty(type_of(i))) {
+                if (STRPRL == 0) die(0, "string print unavailable in this mode");
+                call_rel(STRPRL);
+            } else call_rel(PRINTL);
+            i = NNX[i];
+        }
         return 0;
     }
     if (t == N_IF) {
@@ -1333,6 +1376,24 @@ func gen_stmt(n) {
         jmp_rel(l1);
         put_lab(l2);
         NLOOP = NLOOP - 1;
+        return 0;
+    }
+    if (t == N_FOR) {
+        l1 = lab_new(); l2 = lab_new(); l3 = lab_new(); l4 = lab_new();
+        sn = NVAR; so = CUROFF;               
+        if (NAA[n]) gen_stmt(NAA[n]);
+        BRL[NLOOP] = l4; CTL[NLOOP] = l2; NLOOP = NLOOP + 1;
+        jmp_rel(l3);
+        put_lab(l1);                          
+        gen_stmt(N4[n]);
+        put_lab(l2);                          
+        if (NVV[n]) gen_expr(NVV[n]);
+        put_lab(l3);                          
+        if (NBB[n]) { gen_expr(NBB[n]); test_rax(); je_rel(l4); }
+        jmp_rel(l1);
+        put_lab(l4);
+        NLOOP = NLOOP - 1;
+        NVAR = sn; CUROFF = so;
         return 0;
     }
     if (t == N_BREAK) { jmp_rel(BRL[NLOOP - 1]); return 0; }
@@ -1429,6 +1490,8 @@ func generate() {
     let int g = 0;
     let int p = 0;
     let int pc = 0;
+    let int a = 0;
+    let int b = 0;
     HDR = HDRSZ;
     if (RAW) {
         LITLAB = lab_new();
@@ -1511,6 +1574,25 @@ func generate() {
         mov_rdi_rax();
         e8(15); e8(5);
         leave_ret();
+        
+        STRPRL = lab_new();
+        put_lab(STRPRL);
+        e8(72); e8(137); e8(198);            
+        e8(72); e8(137); e8(242);            
+        a = lab_new();
+        put_lab(a);
+        e8(15); e8(182); e8(2);              
+        e8(132); e8(192);                    
+        b = lab_new();
+        je_rel(b);
+        e8(72); e8(255); e8(194);            
+        jmp_rel(a);
+        put_lab(b);
+        e8(72); e8(41); e8(242);             
+        e8(106); e8(1); e8(88);              
+        e8(106); e8(1); e8(95);              
+        e8(15); e8(5);                       
+        e8(195);                             
     }
     LITLAB = lab_new();
     if (FMT == 1) { ENTRY = EP; emit_entry(); }
@@ -1684,6 +1766,7 @@ func main() {
     BINP[T_STAR] = 322; BINP[T_SLASH] = 323; BINP[T_PERCENT] = 330;
     SYSP = intern("syscall");
     CNAME = intern("const");
+    FORN = intern("for");
     A1N = intern("argv1");
     A2N = intern("argv2");
     DBN = intern("base"); DEN = intern("entry"); DBIN = intern("bin"); DELF = intern("elf"); DNORT = intern("nort");

@@ -2,7 +2,7 @@
 
 单文件、零依赖的微型编译器用于教学：把一门类 C 小语言直接编译成**原生 x86-64 机器码**。
 
-- 编译器本体只有 **~1140 行 C**（`src/main.c`），只用标准 C 库
+- 编译器本体 ~2650 行 C（`src/main.c`），只用标准 C 库；自举版 `src/lgc.lg` ~1850 行
 - **自举编译器** `src/lgc.lg`：用 lgc 语言写的 lgc 编译器（见下文"自举"）
 - 生成的文件可以直接执行：
   - Linux：**ELF** 可执行文件，单 RWX 段布局，最小 **313 字节**
@@ -58,9 +58,14 @@ $ ./a.out
 | `&& \|\| !` | 逻辑与/或（短路求值）/非 |
 | `+= -= *= /= %=` | 复合赋值 |
 | `'A'` | 字符字面量（支持 `\n \t \0 \\ \'`） |
-| `print 表达式;` | 打印整数 |
+| `print 表达式;` | 打印整数（可与字符串参数混用，见上） |
 | `if (条件) { } else { }` | 条件分支 |
 | `while (条件) { }` | 循环 |
+| `for (init; cond; inc) { }` | for 循环（init 可为 `let`；`break`/`continue` 适用） |
+| `switch (x) { case n: … default: … }` | 分支跳转（`break` 跳出） |
+| `struct S { int x; char* s; };` | 结构体（可嵌套，`a.b.c` 成员访问，支持数组） |
+| `enum { A, B = 5, C };` | 枚举常量 |
+| `print 表达式, "文本", …;` | 依次打印：整数按十进制、`char*` 字符串原样输出（不自动加换行） |
 | `func 名字(参数) { return 表达式; }` | 函数定义与调用（递归支持） |
 | `== != < > <= >=` | 比较运算 |
 | `( 表达式 )` | 括号 |
@@ -117,17 +122,7 @@ LGC_DUMP_GREG=1 ./build/my_compiler src/lgc.lg lgc1   # 打印本次选择
 
 ## 自举
 
-`src/lgc.lg` 是用 lgc 语言写成的 lgc 编译器（ELF 后端），全部裸机器码收敛到带注释的指令 helper 中，语义常量（token / AST 节点 / 运算符 / 系统调用号 / ELF 字段）均有命名。
-
-三级自举链：
-
-```sh
-gcc -Os -o build/my_compiler src/main.c   # stage 0：C 版编译器
-./build/my_compiler src/lgc.lg lgc1       # stage 1：C 版编译出第 1 级自举编译器
-./lgc1 src/lgc.lg lgc2                    # stage 2：第 1 级编译出第 2 级
-./lgc2 src/lgc.lg lgc3                    # stage 3：第 2 级编译自己
-cmp lgc2 lgc3                             # 应完全一致（自举收敛）
-```
+`src/lgc.lg` 是用 lgc 语言写成的 lgc 编译器（ELF 后端）。
 
 ## 验证
 

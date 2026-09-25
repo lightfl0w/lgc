@@ -1,0 +1,23 @@
+let char* argv1;
+let int s = 0;
+let int i = 0;
+
+for (let k = 0; k < 5; k += 1) { s += k; }
+print "s=", s, "\n";
+
+for (i = 0; i < 10; i += 1) {
+    if (i == 3) { continue; }
+    if (i == 8) { break; }
+    s += i;
+}
+print "s2=", s, "\n";
+
+print "AB\n";
+print 42, "\n";
+print "mix ", 1 + 1, "!\n";
+
+let int total = 0;
+for (;;) { total += 1; if (total > 4) { break; } }
+print "total=", total, "\n";
+
+for (i = 3; i > 0; i -= 1) print "down ", i, "\n";
