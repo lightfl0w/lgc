@@ -962,6 +962,7 @@ static void rbp_disp(int reg, int off) {
 
 static void mov_rax_imm(long long v) {
     if (!v) { EMIT(0x48, 0x31, 0xC0); return; }
+    if (bin_fmt && !raw_mode && v >= 0 && v <= 127) { EMIT(0xB8); emit_imm(v, 4); return; }
     if (v >= -128 && v <= 127) EMIT(0x6A, (uint8_t)v, 0x58);
     else if (v >= 0 && v <= 0xFFFFFFFFLL) { EMIT(0xB8); emit_imm(v, 4); }
     else if (v >= -2147483648LL && v <= -1) { EMIT(0x48, 0xC7, 0xC0); emit_imm(v, 4); }
@@ -1042,7 +1043,6 @@ static int sh_map[262144 + 1];
 static int sh_flag[8192], sh_kind[8192], sh_patch[8192], sh_nc;
 
 static void shrink_relayout(void) {
-    if (bin_fmt) return;
     sh_nc = 0;
     for (int i = 0; i < npatch; i++) {
         if (PATCH[i].g != 0) continue;
@@ -1623,7 +1623,8 @@ static void gen_expr(ASTNode *n) {
                     case OP_DIV:
                     case OP_MOD:
                         EMIT(0x48, 0x99);
-                        if (v >= -128 && v <= 127) EMIT(0x6A, (uint8_t)v, 0x59);
+                        if (bin_fmt && !raw_mode && v >= 0 && v <= 127) { EMIT(0xB9); emit_imm(v, 4); }
+                        else if (v >= -128 && v <= 127) EMIT(0x6A, (uint8_t)v, 0x59);
                         else if (v >= -2147483648LL && v <= 2147483647LL) { EMIT(0x48, 0xC7, 0xC1); emit_imm(v, 4); }
                         else { EMIT(0x48, 0xB9); emit_imm(v, 8); }
                         EMIT(0x48, 0xF7, 0xF9);
@@ -2698,7 +2699,7 @@ static ASTNode *prop_expr(ASTNode *n) {
                 }
             } else if (!L) {
                 int g = gidx(n->data.variable.name);
-                if (g >= 0 && GCONST[g] && !GASS[g] && !GADDR[g]) {
+                if (g >= 0 && GCONST[g] && !GASS[g] && !GADDR[g] && !freestanding) {
                     n->type = NODE_NUMBER;
                     n->data.number.value = GVAL[g];
                     return n;
@@ -3261,6 +3262,7 @@ static int licm_nglob;
 static char *licm_mod[256];
 static int licm_nmod;
 static int licm_has_call;
+static int licm_memwrite;
 static int licm_id;
 static int licm_flag[VNCAP];
 static char *licm_tmp[VNCAP];
@@ -3288,6 +3290,7 @@ static void licm_collect_expr(ASTNode *n) {
     switch (n->type) {
         case NODE_ASSIGN:
             if (n->data.assign.lhs->type == NODE_VARIABLE) licm_mod_add(n->data.assign.lhs->data.variable.name);
+            else licm_memwrite = 1;
             licm_collect_expr(n->data.assign.lhs);
             licm_collect_expr(n->data.assign.rhs);
             break;
@@ -3329,7 +3332,8 @@ static int licm_invariant(ASTNode *n) {
         case NODE_VARIABLE: {
             const char *name = n->data.variable.name;
             if (licm_mod_has(name)) return 0;
-            if (licm_is_global(name) && licm_has_call) return 0;
+            if (licm_has_call || licm_memwrite) return 0;
+            if (freestanding && licm_is_global(name)) return 0;
             return 1;
         }
         case NODE_BINARY:
@@ -3429,7 +3433,7 @@ static void licm_rewrite_stmt(ASTNode *n) {
 }
 
 static void licm_loop(ASTNode *s) {
-    licm_nmod = 0; licm_has_call = 0;
+    licm_nmod = 0; licm_has_call = 0; licm_memwrite = 0;
     if (s->type == NODE_WHILE) {
         licm_collect_expr(s->data.while_node.cond);
         licm_collect_stmt(s->data.while_node.body);
@@ -5352,7 +5356,7 @@ int main(int argc, char **argv) {
     if (fmt == FMT_BIN) freestanding = 1;
     is_pe = fmt == FMT_PE;
 
-    if (!raw_mode && !boot_mode && !freestanding && !getenv("LGC_NO_OPT")) optimize_program(root);
+    if (!raw_mode && !getenv("LGC_NO_OPT")) optimize_program(root);
 
     if (cli_backend == 2) {
         generate_code(root);
