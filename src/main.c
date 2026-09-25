@@ -3165,7 +3165,99 @@ static void dce_block(ASTNode *b, int top) {
     b->data.block.stmts = out; b->data.block.count = n; b->data.block.cap = cap;
 }
 
+static int tco_id;
+
+static int tco_is_tail(ASTNode *n, const char *fname, int pcount) {
+    if (!n || n->type != NODE_CALL || strcmp(n->data.call.name, fname)) return 0;
+    if (n->data.call.acount != pcount) return 0;
+    for (int i = 0; i < n->data.call.acount; i++)
+        if (!is_spec_pure(n->data.call.args[i])) return 0;
+    return 1;
+}
+
+static ASTNode *tco_replace(ASTNode *call, char **params, int pcount, int line) {
+    ASTNode *b = node(NODE_BLOCK, line);
+    char *tnames[64];
+    for (int i = 0; i < pcount; i++) {
+        char buf[32];
+        sprintf(buf, "$tco%d", tco_id++);
+        tnames[i] = str_put(buf, strlen(buf));
+        PUSH(b->data.block.stmts, b->data.block.count, b->data.block.cap, mk_let(tnames[i], call->data.call.args[i], line));
+    }
+    for (int i = 0; i < pcount; i++) {
+        ASTNode *as = node(NODE_ASSIGN, line);
+        as->data.assign.lhs = mk_var(params[i], line);
+        as->data.assign.cop = 0;
+        as->data.assign.rhs = mk_var(tnames[i], line);
+        PUSH(b->data.block.stmts, b->data.block.count, b->data.block.cap, as);
+    }
+    PUSH(b->data.block.stmts, b->data.block.count, b->data.block.cap, node(NODE_CONTINUE, line));
+    return b;
+}
+
+static void tco_stmt(ASTNode **slot, const char *fname, char **params, int pcount, int in_loop, int *found);
+static void tco_block(ASTNode *b, const char *fname, char **params, int pcount, int in_loop, int *found) {
+    if (!b) return;
+    for (int i = 0; i < b->data.block.count; i++)
+        tco_stmt(&b->data.block.stmts[i], fname, params, pcount, in_loop, found);
+}
+static void tco_stmt(ASTNode **slot, const char *fname, char **params, int pcount, int in_loop, int *found) {
+    ASTNode *n = *slot;
+    if (!n) return;
+    switch (n->type) {
+        case NODE_RETURN:
+            if (!in_loop && n->data.return_node.value && tco_is_tail(n->data.return_node.value, fname, pcount)) {
+                *slot = tco_replace(n->data.return_node.value, params, pcount, n->line);
+                *found = 1;
+            }
+            break;
+        case NODE_BLOCK:
+            tco_block(n, fname, params, pcount, in_loop, found);
+            break;
+        case NODE_IF:
+            tco_stmt(&n->data.if_node.then, fname, params, pcount, in_loop, found);
+            tco_stmt(&n->data.if_node.else_, fname, params, pcount, in_loop, found);
+            break;
+        case NODE_WHILE:
+            tco_stmt(&n->data.while_node.body, fname, params, pcount, 1, found);
+            break;
+        case NODE_FOR:
+            tco_stmt(&n->data.for_node.init, fname, params, pcount, 1, found);
+            tco_stmt(&n->data.for_node.body, fname, params, pcount, 1, found);
+            break;
+        case NODE_SWITCH:
+            for (int i = 0; i < n->data.switch_node.narms; i++)
+                tco_block(n->data.switch_node.arms[i]->data.case_arm.blk, fname, params, pcount, 1, found);
+            break;
+        default:
+            break;
+    }
+}
+
+static void tco_function(ASTNode *f) {
+    if (f->data.function.naked || f->data.function.pcount > 64) return;
+    int found = 0;
+    tco_block(f->data.function.body, f->data.function.name, f->data.function.params, f->data.function.pcount, 0, &found);
+    if (!found) return;
+    ASTNode *loop = node(NODE_FOR, f->line);
+    loop->data.for_node.init = NULL;
+    loop->data.for_node.cond = NULL;
+    loop->data.for_node.inc = NULL;
+    loop->data.for_node.body = f->data.function.body;
+    ASTNode *nb = node(NODE_BLOCK, f->line);
+    PUSH(nb->data.block.stmts, nb->data.block.count, nb->data.block.cap, loop);
+    f->data.function.body = nb;
+}
+
+static void tco_program(ASTNode *root) {
+    for (int i = 0; i < root->data.block.count; i++) {
+        ASTNode *n = root->data.block.stmts[i];
+        if (n->type == NODE_FUNCTION) tco_function(n);
+    }
+}
+
 static void optimize_program(ASTNode *root) {
+    tco_program(root);
     opt_fold_block(root);
     analyze_program(root);
     prop_program(root);
