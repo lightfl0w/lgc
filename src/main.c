@@ -3256,6 +3256,270 @@ static void tco_program(ASTNode *root) {
     }
 }
 
+static char *licm_globals[256];
+static int licm_nglob;
+static char *licm_mod[256];
+static int licm_nmod;
+static int licm_has_call;
+static int licm_id;
+static int licm_flag[VNCAP];
+static char *licm_tmp[VNCAP];
+static struct { char *tmp; ASTNode *val; } *licm_hoist;
+static int licm_nhoist, licm_hcap;
+
+static int licm_is_global(const char *name) {
+    for (int i = 0; i < licm_nglob; i++) if (!strcmp(licm_globals[i], name)) return 1;
+    return 0;
+}
+static int licm_mod_has(const char *name) {
+    for (int i = 0; i < licm_nmod; i++) if (!strcmp(licm_mod[i], name)) return 1;
+    return 0;
+}
+static void licm_mod_add(const char *name) {
+    if (licm_nmod < 256 && !licm_mod_has(name)) licm_mod[licm_nmod++] = (char *)name;
+}
+static void licm_hoist_add(char *tmp, ASTNode *val) {
+    if (licm_nhoist >= licm_hcap) { licm_hcap = licm_hcap ? licm_hcap * 2 : 8; licm_hoist = realloc(licm_hoist, licm_hcap * sizeof *licm_hoist); }
+    licm_hoist[licm_nhoist].tmp = tmp; licm_hoist[licm_nhoist].val = val; licm_nhoist++;
+}
+
+static void licm_collect_expr(ASTNode *n) {
+    if (!n) return;
+    switch (n->type) {
+        case NODE_ASSIGN:
+            if (n->data.assign.lhs->type == NODE_VARIABLE) licm_mod_add(n->data.assign.lhs->data.variable.name);
+            licm_collect_expr(n->data.assign.lhs);
+            licm_collect_expr(n->data.assign.rhs);
+            break;
+        case NODE_ADDR:
+            if (n->data.unary.value->type == NODE_VARIABLE) licm_mod_add(n->data.unary.value->data.variable.name);
+            else licm_collect_expr(n->data.unary.value);
+            break;
+        case NODE_CALL:
+            licm_has_call = 1;
+            for (int i = 0; i < n->data.call.acount; i++) licm_collect_expr(n->data.call.args[i]);
+            break;
+        case NODE_BINARY: licm_collect_expr(n->data.binary.left); licm_collect_expr(n->data.binary.right); break;
+        case NODE_NOT: case NODE_BNOT: case NODE_DEREF: licm_collect_expr(n->data.unary.value); break;
+        case NODE_INDEX: licm_collect_expr(n->data.index.base); licm_collect_expr(n->data.index.index); break;
+        case NODE_MEMBER: licm_collect_expr(n->data.member.base); break;
+        default: break;
+    }
+}
+
+static void licm_collect_stmt(ASTNode *n) {
+    if (!n) return;
+    switch (n->type) {
+        case NODE_LET: licm_collect_expr(n->data.let.value); break;
+        case NODE_PRINT: for (int i = 0; i < n->data.print.ncount; i++) licm_collect_expr(n->data.print.args[i]); break;
+        case NODE_RETURN: licm_collect_expr(n->data.return_node.value); break;
+        case NODE_IF: licm_collect_expr(n->data.if_node.cond); licm_collect_stmt(n->data.if_node.then); licm_collect_stmt(n->data.if_node.else_); break;
+        case NODE_WHILE: licm_collect_expr(n->data.while_node.cond); licm_collect_stmt(n->data.while_node.body); break;
+        case NODE_FOR: licm_collect_stmt(n->data.for_node.init); licm_collect_expr(n->data.for_node.cond); licm_collect_expr(n->data.for_node.inc); licm_collect_stmt(n->data.for_node.body); break;
+        case NODE_SWITCH: licm_collect_expr(n->data.switch_node.expr); for (int i = 0; i < n->data.switch_node.narms; i++) licm_collect_stmt(n->data.switch_node.arms[i]->data.case_arm.blk); break;
+        case NODE_BLOCK: for (int i = 0; i < n->data.block.count; i++) licm_collect_stmt(n->data.block.stmts[i]); break;
+        default: licm_collect_expr(n); break;
+    }
+}
+
+static int licm_invariant(ASTNode *n) {
+    if (!n) return 0;
+    switch (n->type) {
+        case NODE_NUMBER: return 1;
+        case NODE_VARIABLE: {
+            const char *name = n->data.variable.name;
+            if (licm_mod_has(name)) return 0;
+            if (licm_is_global(name) && licm_has_call) return 0;
+            return 1;
+        }
+        case NODE_BINARY:
+            if (n->data.binary.op == OP_DIV || n->data.binary.op == OP_MOD) return 0;
+            return licm_invariant(n->data.binary.left) && licm_invariant(n->data.binary.right);
+        case NODE_NOT: case NODE_BNOT: return licm_invariant(n->data.unary.value);
+        default: return 0;
+    }
+}
+
+static int licm_worth(ASTNode *n) {
+    if (n->type != NODE_BINARY) return 0;
+    ASTNode *l = n->data.binary.left, *r = n->data.binary.right;
+    return l->type == NODE_BINARY || l->type == NODE_NOT || l->type == NODE_BNOT ||
+           r->type == NODE_BINARY || r->type == NODE_NOT || r->type == NODE_BNOT;
+}
+
+static void licm_reset(void) {
+    for (int i = 0; i < vk_n; i++) { licm_flag[i] = 0; licm_tmp[i] = NULL; }
+    vk_n = 0;
+    licm_nhoist = 0;
+}
+
+static void licm_count_expr(ASTNode *n) {
+    if (!n) return;
+    switch (n->type) {
+        case NODE_NUMBER: case NODE_VARIABLE: { int v = vn_expr(n); vnv[OIDX(n)] = v; break; }
+        case NODE_BINARY:
+            licm_count_expr(n->data.binary.left);
+            licm_count_expr(n->data.binary.right);
+            { int v = vn_expr(n); vnv[OIDX(n)] = v; if (licm_worth(n) && licm_invariant(n)) licm_flag[v] = 1; }
+            break;
+        case NODE_NOT: case NODE_BNOT:
+            licm_count_expr(n->data.unary.value);
+            { int v = vn_expr(n); vnv[OIDX(n)] = v; }
+            break;
+        default: break;
+    }
+}
+
+static void licm_count_stmt(ASTNode *n) {
+    if (!n) return;
+    switch (n->type) {
+        case NODE_LET: licm_count_expr(n->data.let.value); break;
+        case NODE_PRINT: for (int i = 0; i < n->data.print.ncount; i++) licm_count_expr(n->data.print.args[i]); break;
+        case NODE_RETURN: licm_count_expr(n->data.return_node.value); break;
+        case NODE_ASSIGN: licm_count_expr(n->data.assign.rhs); break;
+        case NODE_IF: licm_count_expr(n->data.if_node.cond); licm_count_stmt(n->data.if_node.then); licm_count_stmt(n->data.if_node.else_); break;
+        case NODE_WHILE: licm_count_expr(n->data.while_node.cond); licm_count_stmt(n->data.while_node.body); break;
+        case NODE_FOR: licm_count_stmt(n->data.for_node.init); licm_count_expr(n->data.for_node.cond); licm_count_expr(n->data.for_node.inc); licm_count_stmt(n->data.for_node.body); break;
+        case NODE_SWITCH: licm_count_expr(n->data.switch_node.expr); for (int i = 0; i < n->data.switch_node.narms; i++) licm_count_stmt(n->data.switch_node.arms[i]->data.case_arm.blk); break;
+        case NODE_BLOCK: for (int i = 0; i < n->data.block.count; i++) licm_count_stmt(n->data.block.stmts[i]); break;
+        default: licm_count_expr(n); break;
+    }
+}
+
+static ASTNode *licm_rewrite_expr(ASTNode *n) {
+    if (!n) return NULL;
+    switch (n->type) {
+        case NODE_NUMBER: case NODE_VARIABLE: return n;
+        case NODE_BINARY:
+            n->data.binary.left = licm_rewrite_expr(n->data.binary.left);
+            n->data.binary.right = licm_rewrite_expr(n->data.binary.right);
+            break;
+        case NODE_NOT: case NODE_BNOT:
+            n->data.unary.value = licm_rewrite_expr(n->data.unary.value);
+            break;
+        default: return n;
+    }
+    int v = vnv[OIDX(n)];
+    if (v >= 0 && licm_flag[v]) {
+        if (!licm_tmp[v]) {
+            char buf[32];
+            sprintf(buf, "$licm%d", licm_id++);
+            licm_tmp[v] = str_put(buf, strlen(buf));
+            licm_hoist_add(licm_tmp[v], n);
+        }
+        return mk_var(licm_tmp[v], n->line);
+    }
+    return n;
+}
+
+static void licm_rewrite_stmt(ASTNode *n) {
+    if (!n) return;
+    switch (n->type) {
+        case NODE_LET: n->data.let.value = licm_rewrite_expr(n->data.let.value); break;
+        case NODE_PRINT: for (int i = 0; i < n->data.print.ncount; i++) n->data.print.args[i] = licm_rewrite_expr(n->data.print.args[i]); break;
+        case NODE_RETURN: n->data.return_node.value = licm_rewrite_expr(n->data.return_node.value); break;
+        case NODE_ASSIGN: n->data.assign.rhs = licm_rewrite_expr(n->data.assign.rhs); break;
+        case NODE_IF: n->data.if_node.cond = licm_rewrite_expr(n->data.if_node.cond); licm_rewrite_stmt(n->data.if_node.then); licm_rewrite_stmt(n->data.if_node.else_); break;
+        case NODE_WHILE: n->data.while_node.cond = licm_rewrite_expr(n->data.while_node.cond); licm_rewrite_stmt(n->data.while_node.body); break;
+        case NODE_FOR: licm_rewrite_stmt(n->data.for_node.init); n->data.for_node.cond = licm_rewrite_expr(n->data.for_node.cond); n->data.for_node.inc = licm_rewrite_expr(n->data.for_node.inc); licm_rewrite_stmt(n->data.for_node.body); break;
+        case NODE_SWITCH: n->data.switch_node.expr = licm_rewrite_expr(n->data.switch_node.expr); for (int i = 0; i < n->data.switch_node.narms; i++) licm_rewrite_stmt(n->data.switch_node.arms[i]->data.case_arm.blk); break;
+        case NODE_BLOCK: for (int i = 0; i < n->data.block.count; i++) licm_rewrite_stmt(n->data.block.stmts[i]); break;
+        default: break;
+    }
+}
+
+static void licm_loop(ASTNode *s) {
+    licm_nmod = 0; licm_has_call = 0;
+    if (s->type == NODE_WHILE) {
+        licm_collect_expr(s->data.while_node.cond);
+        licm_collect_stmt(s->data.while_node.body);
+    } else {
+        licm_collect_stmt(s->data.for_node.init);
+        licm_collect_expr(s->data.for_node.cond);
+        licm_collect_expr(s->data.for_node.inc);
+        licm_collect_stmt(s->data.for_node.body);
+    }
+    licm_reset();
+    if (s->type == NODE_WHILE) {
+        licm_count_expr(s->data.while_node.cond);
+        licm_count_stmt(s->data.while_node.body);
+    } else {
+        licm_count_stmt(s->data.for_node.init);
+        licm_count_expr(s->data.for_node.cond);
+        licm_count_expr(s->data.for_node.inc);
+        licm_count_stmt(s->data.for_node.body);
+    }
+    if (s->type == NODE_WHILE) {
+        s->data.while_node.cond = licm_rewrite_expr(s->data.while_node.cond);
+        licm_rewrite_stmt(s->data.while_node.body);
+    } else {
+        licm_rewrite_stmt(s->data.for_node.init);
+        s->data.for_node.cond = licm_rewrite_expr(s->data.for_node.cond);
+        s->data.for_node.inc = licm_rewrite_expr(s->data.for_node.inc);
+        licm_rewrite_stmt(s->data.for_node.body);
+    }
+}
+
+static void licm_block(ASTNode *b);
+static void licm_sub(ASTNode **slot);
+
+static void licm_block(ASTNode *b) {
+    if (!b) return;
+    ASTNode **out = NULL; int n = 0, cap = 0;
+    for (int i = 0; i < b->data.block.count; i++) {
+        ASTNode *s = b->data.block.stmts[i];
+        switch (s->type) {
+            case NODE_BLOCK: licm_block(s); break;
+            case NODE_IF: licm_sub(&s->data.if_node.then); licm_sub(&s->data.if_node.else_); break;
+            case NODE_FUNCTION: licm_block(s->data.function.body); break;
+            case NODE_SWITCH: for (int k = 0; k < s->data.switch_node.narms; k++) licm_block(s->data.switch_node.arms[k]->data.case_arm.blk); break;
+            case NODE_WHILE: case NODE_FOR:
+                if (s->type == NODE_WHILE) licm_sub(&s->data.while_node.body);
+                else licm_sub(&s->data.for_node.body);
+                licm_loop(s);
+                for (int k = 0; k < licm_nhoist; k++) PUSH(out, n, cap, mk_let(licm_hoist[k].tmp, licm_hoist[k].val, s->line));
+                licm_nhoist = 0;
+                break;
+            default: break;
+        }
+        PUSH(out, n, cap, s);
+    }
+    b->data.block.stmts = out; b->data.block.count = n; b->data.block.cap = cap;
+}
+
+static void licm_sub(ASTNode **slot) {
+    if (!*slot) return;
+    if ((*slot)->type == NODE_BLOCK) { licm_block(*slot); return; }
+    ASTNode *s = *slot;
+    if (s->type == NODE_WHILE || s->type == NODE_FOR) {
+        if (s->type == NODE_WHILE) licm_sub(&s->data.while_node.body);
+        else licm_sub(&s->data.for_node.body);
+        licm_loop(s);
+        if (licm_nhoist) {
+            ASTNode *b = node(NODE_BLOCK, s->line);
+            for (int k = 0; k < licm_nhoist; k++) PUSH(b->data.block.stmts, b->data.block.count, b->data.block.cap, mk_let(licm_hoist[k].tmp, licm_hoist[k].val, s->line));
+            PUSH(b->data.block.stmts, b->data.block.count, b->data.block.cap, s);
+            licm_nhoist = 0;
+            *slot = b;
+        }
+        return;
+    }
+    switch (s->type) {
+        case NODE_IF: licm_sub(&s->data.if_node.then); licm_sub(&s->data.if_node.else_); break;
+        case NODE_SWITCH: for (int i = 0; i < s->data.switch_node.narms; i++) licm_block(s->data.switch_node.arms[i]->data.case_arm.blk); break;
+        default: break;
+    }
+}
+
+static void licm_program(ASTNode *root) {
+    licm_nglob = 0;
+    for (int i = 0; i < root->data.block.count; i++) {
+        ASTNode *n = root->data.block.stmts[i];
+        if (n->type == NODE_LET) licm_globals[licm_nglob++] = n->data.let.name;
+    }
+    licm_block(root);
+}
+
 static void optimize_program(ASTNode *root) {
     tco_program(root);
     opt_fold_block(root);
@@ -3263,6 +3527,7 @@ static void optimize_program(ASTNode *root) {
     prop_program(root);
     opt_fold_block(root);
     fb_block(root);
+    licm_program(root);
     cse_block(root);
     dce_count_program(root);
     dce_block(root, 1);
