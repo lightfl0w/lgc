@@ -3787,8 +3787,1512 @@ static void load_tokens(const char *path, Token **tokens, int *tcnt, int *tcap) 
     }
 }
 
+typedef enum { T_I1, T_I8, T_I64, T_PTR, T_VOID } ITy;
+typedef enum { K_CONST, K_REG, K_GLOBAL, K_FUNC, K_LIT } VKind;
+typedef struct { VKind k; long c; int id; const char *nm; } V;
+
+typedef enum {
+    OP_BIN, OP_ICMP, OP_LOAD, OP_STORE, OP_ALLOCA, OP_CALL, OP_BR, OP_CBR, OP_RET, OP_PRINT, OP_ZEXT, OP_TRUNC, OP_GADDR,
+    OP_PTRADD, OP_SYSCALL, OP_COPY, OP_PHI, OP_DEAD
+} IOp;
+
+typedef struct I {
+    IOp op; ITy ty; int sub; int dst; V a, b; int t1, t2;
+    V *args; int nargs; int *ppred;
+    const char *nm;
+    long bytes;
+    int mk;
+    struct I *next;
+} I;
+
+typedef struct B { int id; char nm[16]; I *head, *tail; struct B *next; } B;
+typedef struct F { const char *nm; int np; char **params; int preg[16]; B *blocks, *cur; struct F *next; } F;
+
+static F *ir_funcs;
+static int ir_nreg = 1, ir_nblk = 0;
+static int ir_brk = -1, ir_cont = -1;
+
+static struct { const char *nm; ITy ty; long init; int has_init; Type *gast; } ir_globals[256];
+static int ir_nglob;
+static struct { const char *data; int len; } ir_strs[256];
+static int ir_nstr;
+
+enum { B_ADD, B_SUB, B_MUL, B_SDIV, B_SREM, B_AND, B_OR, B_XOR, B_SHL, B_SAR };
+enum { C_EQ, C_NE, C_SLT, C_SLE, C_SGT, C_SGE };
+
+static ITy ir_ty(Type *t) {
+    if (!t) return T_I64;
+    if (t->kind == 1 || t->kind == 2 || t->kind == 3) return T_PTR;
+    return t->sz == 1 ? T_I8 : T_I64;
+}
+
+static V kconst(long c) { V v = { K_CONST, c, 0, NULL }; return v; }
+static V kreg(int id) { V v = { K_REG, 0, id, NULL }; return v; }
+
+static B *ir_newblock(F *f, const char *hint) {
+    B *b = calloc(1, sizeof *b);
+    b->id = ir_nblk++;
+    sprintf(b->nm, "L%d", b->id);
+    (void)hint;
+    if (f->blocks) { B *p = f->blocks; while (p->next) p = p->next; p->next = b; }
+    else f->blocks = b;
+    return b;
+}
+
+static I *ir_emit(F *f, IOp op) {
+    I *in = calloc(1, sizeof *in);
+    in->op = op; in->dst = -1;
+    if (f->cur->tail) { f->cur->tail->next = in; f->cur->tail = in; }
+    else { f->cur->head = f->cur->tail = in; }
+    return in;
+}
+
+static V ir_bin(F *f, int sub, V a, V b) {
+    I *in = ir_emit(f, OP_BIN); in->sub = sub; in->ty = T_I64; in->dst = ir_nreg++; in->a = a; in->b = b;
+    return kreg(in->dst);
+}
+static V ir_icmp(F *f, int sub, V a, V b) {
+    I *in = ir_emit(f, OP_ICMP); in->sub = sub; in->ty = T_I1; in->dst = ir_nreg++; in->a = a; in->b = b;
+    return kreg(in->dst);
+}
+static V ir_alloca(F *f, ITy ty, long bytes) {
+    I *in = ir_emit(f, OP_ALLOCA); in->ty = ty; in->dst = ir_nreg++; in->bytes = bytes;
+    return kreg(in->dst);
+}
+static V ir_ptradd(F *f, V a, V b) {
+    I *in = ir_emit(f, OP_PTRADD); in->ty = T_PTR; in->dst = ir_nreg++; in->a = a; in->b = b;
+    return kreg(in->dst);
+}
+static V ir_load(F *f, ITy ty, V p) {
+    I *in = ir_emit(f, OP_LOAD); in->ty = ty; in->dst = ir_nreg++; in->a = p;
+    return kreg(in->dst);
+}
+static void ir_store(F *f, ITy ty, V v, V p) {
+    I *in = ir_emit(f, OP_STORE); in->ty = ty; in->a = v; in->b = p;
+}
+static V ir_zext(F *f, V a) {
+    I *in = ir_emit(f, OP_ZEXT); in->ty = T_I64; in->dst = ir_nreg++; in->a = a;
+    return kreg(in->dst);
+}
+static V ir_trunc(F *f, V a) {
+    I *in = ir_emit(f, OP_TRUNC); in->ty = T_I8; in->dst = ir_nreg++; in->a = a;
+    return kreg(in->dst);
+}
+static V ir_gaddr(F *f, const char *nm) {
+    I *in = ir_emit(f, OP_GADDR); in->ty = T_PTR; in->dst = ir_nreg++; in->nm = nm;
+    return kreg(in->dst);
+}
+
+static int ir_terminated(F *f) {
+    if (!f->cur->tail) return 0;
+    IOp op = f->cur->tail->op;
+    return op == OP_RET || op == OP_BR || op == OP_CBR;
+}
+
+static struct { const char *nm; V val; ITy ty; Type *ast; } ir_sym[4096];
+static int ir_symn;
+static int ir_lookup(const char *nm, V *val, ITy *ty) {
+    for (int i = ir_symn - 1; i >= 0; i--) {
+        if (!strcmp(ir_sym[i].nm, nm)) { *val = ir_sym[i].val; *ty = ir_sym[i].ty; return 1; }
+    }
+    return 0;
+}
+static Type *ir_sym_ast(const char *nm) {
+    for (int i = ir_symn - 1; i >= 0; i--)
+        if (!strcmp(ir_sym[i].nm, nm)) return ir_sym[i].ast;
+    return NULL;
+}
+static void ir_bind(const char *nm, V val, ITy ty, Type *ast) {
+    ir_sym[ir_symn].nm = nm; ir_sym[ir_symn].val = val; ir_sym[ir_symn].ty = ty; ir_sym[ir_symn].ast = ast; ir_symn++;
+}
+static ITy ir_global_ty(const char *nm) {
+    for (int i = 0; i < ir_nglob; i++) if (!strcmp(ir_globals[i].nm, nm)) return ir_globals[i].ty;
+    return T_I64;
+}
+static Type *ir_global_ast(const char *nm) {
+    for (int i = 0; i < ir_nglob; i++) if (!strcmp(ir_globals[i].nm, nm)) return ir_globals[i].gast;
+    return NULL;
+}
+
+static int map_bin(BinOp op) {
+    switch (op) {
+        case OP_SUB: return B_SUB;
+        case OP_MUL: return B_MUL;
+        case OP_DIV: return B_SDIV;
+        case OP_MOD: return B_SREM;
+        case OP_BAND: return B_AND;
+        case OP_BOR: return B_OR;
+        case OP_BXOR: return B_XOR;
+        case OP_SHL: return B_SHL;
+        case OP_SHR: return B_SAR;
+        default: return B_ADD;
+    }
+}
+static int map_cmp(BinOp op) {
+    switch (op) {
+        case OP_NE: return C_NE;
+        case OP_LT: return C_SLT;
+        case OP_LE: return C_SLE;
+        case OP_GT: return C_SGT;
+        case OP_GE: return C_SGE;
+        default: return C_EQ;
+    }
+}
+
+static V lower_expr(F *f, ASTNode *n);
+static void lower_stmt(F *f, ASTNode *n);
+
+static Type *ir_expr_ty(ASTNode *n);
+
+static Type *ir_var_ty(const char *nm) {
+    Type *t = ir_sym_ast(nm);
+    if (t) return t;
+    t = ir_global_ast(nm);
+    return t ? t : &TY_INT;
+}
+
+static Type *ir_struct_of(ASTNode *b, int arrow) {
+    Type *bt = ir_expr_ty(b);
+    if (arrow) { if (bt->kind != 1) die("-> applied to non-pointer", b->line); bt = bt->base; }
+    if (!bt || bt->kind != 3) die("member access on non-struct", b->line);
+    return bt;
+}
+
+static int ir_is_char_ty(Type *t) { return t && t->kind == 0 && t->sz == 1; }
+static ITy ir_mem_ty(Type *t) { return ir_is_char_ty(t) ? T_I8 : T_I64; }
+
+static Type *ir_expr_ty(ASTNode *n) {
+    switch (n->type) {
+        case NODE_VARIABLE: return ir_var_ty(n->data.variable.name);
+        case NODE_STR:      return ty_ptr(&TY_CHAR);
+        case NODE_DEREF:  { Type *t = ir_expr_ty(n->data.unary.value); return t->kind ? t->base : &TY_INT; }
+        case NODE_INDEX:  { Type *t = ir_expr_ty(n->data.index.base); return t->kind ? t->base : &TY_INT; }
+        case NODE_ADDR:     return ty_ptr(ir_expr_ty(n->data.unary.value));
+        case NODE_MEMBER: {
+            Field *fl = struct_field(ir_struct_of(n->data.member.base, n->data.member.arrow), n->data.member.field);
+            if (!fl) die("no such field", n->line);
+            return fl->ty;
+        }
+        default: return &TY_INT;
+    }
+}
+
+static V lower_addr(F *f, ASTNode *n) {
+    switch (n->type) {
+        case NODE_VARIABLE: {
+            V p; ITy ty;
+            if (ir_lookup(n->data.variable.name, &p, &ty)) return p;
+            return ir_gaddr(f, n->data.variable.name);
+        }
+        case NODE_DEREF: return lower_expr(f, n->data.unary.value);
+        case NODE_INDEX: {
+            Type *bt = ir_expr_ty(n->data.index.base);
+            V base = bt->kind == 1 ? lower_expr(f, n->data.index.base) : lower_addr(f, n->data.index.base);
+            V iv = lower_expr(f, n->data.index.index);
+            int es = ty_size(ir_expr_ty(n));
+            if (es != 1 && es != 8) iv = ir_bin(f, B_MUL, iv, kconst(es));
+            else if (es == 8) iv = ir_bin(f, B_SHL, iv, kconst(3));
+            return ir_ptradd(f, base, iv);
+        }
+        case NODE_MEMBER: {
+            Field *fl = struct_field(ir_struct_of(n->data.member.base, n->data.member.arrow), n->data.member.field);
+            if (!fl) die("no such field", n->line);
+            V base = n->data.member.arrow ? lower_expr(f, n->data.member.base) : lower_addr(f, n->data.member.base);
+            if (fl->off) return ir_bin(f, B_ADD, base, kconst(fl->off));
+            return base;
+        }
+        default: die("not addressable", n->line); return kconst(0);
+    }
+}
+
+static int ir_is_str_arg(ASTNode *e) {
+    Type *t = ir_expr_ty(e);
+    return (t->kind == 1 || t->kind == 2) && is_char(t->base);
+}
+
+static V lower_logic(F *f, ASTNode *n) {
+    int is_and = n->data.binary.op == OP_AND;
+    V tmp = ir_alloca(f, T_I1, 8);
+    V a = lower_expr(f, n->data.binary.left);
+    V ac = ir_icmp(f, C_NE, a, kconst(0));
+    B *rhs = ir_newblock(f, "logic.rhs");
+    B *sc = ir_newblock(f, "logic.sc");
+    B *end = ir_newblock(f, "logic.end");
+    I *cbr = ir_emit(f, OP_CBR); cbr->a = ac; cbr->t1 = is_and ? rhs->id : sc->id; cbr->t2 = is_and ? sc->id : rhs->id;
+    f->cur = sc;
+    ir_store(f, T_I1, is_and ? kconst(0) : kconst(1), tmp);
+    ir_emit(f, OP_BR)->t1 = end->id;
+    f->cur = rhs;
+    V b = lower_expr(f, n->data.binary.right);
+    V bc = ir_icmp(f, C_NE, b, kconst(0));
+    ir_store(f, T_I1, bc, tmp);
+    ir_emit(f, OP_BR)->t1 = end->id;
+    f->cur = end;
+    return ir_load(f, T_I1, tmp);
+}
+
+static V lower_expr(F *f, ASTNode *n) {
+    switch (n->type) {
+        case NODE_NUMBER: return kconst(n->data.number.value);
+        case NODE_VARIABLE: {
+            V p; ITy ty;
+            Type *ast = ir_sym_ast(n->data.variable.name);
+            if (ir_lookup(n->data.variable.name, &p, &ty)) {
+                if (ast && ast->kind == 2) return p;
+            } else {
+                p = ir_gaddr(f, n->data.variable.name);
+                ty = ir_global_ty(n->data.variable.name);
+                ast = ir_global_ast(n->data.variable.name);
+                if (ast && ast->kind == 2) return p;
+            }
+            V v = ir_load(f, ty, p);
+            return ty == T_I8 ? ir_zext(f, v) : v;
+        }
+        case NODE_STR: {
+            char nm[16];
+            sprintf(nm, ".str%d", ir_nstr);
+            ir_strs[ir_nstr].data = (const char *)(LIT + n->data.str.off);
+            ir_strs[ir_nstr].len = n->data.str.len;
+            ir_nstr++;
+            V v = { K_LIT, n->data.str.off, 0, str_put(nm, strlen(nm)) };
+            return v;
+        }
+        case NODE_BINARY: {
+            BinOp op = n->data.binary.op;
+            if (op == OP_AND || op == OP_OR) return lower_logic(f, n);
+            V a = lower_expr(f, n->data.binary.left);
+            V b = lower_expr(f, n->data.binary.right);
+            if (op >= OP_EQ && op <= OP_GE) return ir_icmp(f, map_cmp(op), a, b);
+            return ir_bin(f, map_bin(op), a, b);
+        }
+        case NODE_NOT: {
+            V a = lower_expr(f, n->data.unary.value);
+            return ir_icmp(f, C_EQ, a, kconst(0));
+        }
+        case NODE_BNOT: {
+            V a = lower_expr(f, n->data.unary.value);
+            return ir_bin(f, B_XOR, a, kconst(-1));
+        }
+        case NODE_SIZEOF: {
+            ASTNode *u = n->data.unary.value;
+            int sz = 8;
+            if (u->type == NODE_VARIABLE) sz = ty_size(ir_var_ty(u->data.variable.name));
+            return kconst(sz);
+        }
+        case NODE_ADDR: return lower_addr(f, n->data.unary.value);
+        case NODE_DEREF: {
+            V p = lower_expr(f, n->data.unary.value);
+            ITy lt = ir_mem_ty(ir_expr_ty(n));
+            V v = ir_load(f, lt, p);
+            return lt == T_I8 ? ir_zext(f, v) : v;
+        }
+        case NODE_INDEX: {
+            V p = lower_addr(f, n);
+            ITy lt = ir_mem_ty(ir_expr_ty(n));
+            V v = ir_load(f, lt, p);
+            return lt == T_I8 ? ir_zext(f, v) : v;
+        }
+        case NODE_MEMBER: {
+            Type *ft = ir_expr_ty(n);
+            V p = lower_addr(f, n);
+            if (ft->kind == 2 || ft->kind == 3) return p;
+            V v = ir_load(f, ir_mem_ty(ft), p);
+            return ir_mem_ty(ft) == T_I8 ? ir_zext(f, v) : v;
+        }
+        case NODE_ASSIGN: {
+            V rhs = lower_expr(f, n->data.assign.rhs);
+            if (n->data.assign.lhs->type == NODE_VARIABLE) {
+                V p; ITy ty;
+                if (!ir_lookup(n->data.assign.lhs->data.variable.name, &p, &ty)) {
+                    p = ir_gaddr(f, n->data.assign.lhs->data.variable.name);
+                    ty = ir_global_ty(n->data.assign.lhs->data.variable.name);
+                }
+                if (n->data.assign.cop) {
+                    V cur = ir_load(f, ty, p);
+                    if (ty == T_I8) cur = ir_zext(f, cur);
+                    rhs = ir_bin(f, map_bin((BinOp)(n->data.assign.cop - 1)), cur, rhs);
+                }
+                if (ty == T_I8) rhs = ir_trunc(f, rhs);
+                ir_store(f, ty, rhs, p);
+                return rhs;
+            }
+            V p = lower_addr(f, n->data.assign.lhs);
+            ITy lt = ir_mem_ty(ir_expr_ty(n->data.assign.lhs));
+            if (n->data.assign.cop) {
+                V cur = ir_load(f, lt, p);
+                if (lt == T_I8) cur = ir_zext(f, cur);
+                rhs = ir_bin(f, map_bin((BinOp)(n->data.assign.cop - 1)), cur, rhs);
+            }
+            if (lt == T_I8) rhs = ir_trunc(f, rhs);
+            ir_store(f, lt, rhs, p);
+            return rhs;
+        }
+        case NODE_CALL: {
+            const char *nm = n->data.call.name;
+            int na = n->data.call.acount;
+            if (!strcmp(nm, "syscall") && fn_find("syscall") < 0) {
+                if (na != 4) die("syscall(nr, a, b, c)", n->line);
+                V args[4];
+                for (int i = 0; i < 4; i++) args[i] = lower_expr(f, n->data.call.args[i]);
+                I *in = ir_emit(f, OP_SYSCALL);
+                in->dst = ir_nreg++; in->ty = T_I64; in->nargs = 4;
+                in->args = malloc(4 * sizeof(V));
+                for (int i = 0; i < 4; i++) in->args[i] = args[i];
+                return kreg(in->dst);
+            }
+            if (!strcmp(nm, "addr") && fn_find("addr") < 0 && na == 1)
+                return lower_addr(f, n->data.call.args[0]);
+            if (fn_find(nm) < 0) {
+                die("call to undefined function (IR backend)", n->line);
+            }
+            V args[64];
+            for (int i = 0; i < na; i++) args[i] = lower_expr(f, n->data.call.args[i]);
+            I *in = ir_emit(f, OP_CALL);
+            in->dst = ir_nreg++; in->ty = T_I64;
+            in->nm = nm;
+            in->args = na ? malloc(na * sizeof(V)) : NULL;
+            in->nargs = na;
+            for (int i = 0; i < na; i++) in->args[i] = args[i];
+            return kreg(in->dst);
+        }
+        default:
+            return kconst(0);
+    }
+}
+
+static void lower_print(F *f, ASTNode *n) {
+    for (int i = 0; i < n->data.print.ncount; i++) {
+        ASTNode *a = n->data.print.args[i];
+        V v = lower_expr(f, a);
+        I *in = ir_emit(f, OP_PRINT);
+        in->sub = ir_is_str_arg(a) ? 1 : 0;
+        in->a = v;
+    }
+}
+
+static void lower_stmt(F *f, ASTNode *n) {
+    if (!n) return;
+    switch (n->type) {
+        case NODE_LET: {
+            Type *ast = n->data.let.ty;
+            ITy ty = ir_ty(ast);
+            long bytes = (ast->kind == 2 || ast->kind == 3) ? ty_size(ast) : 8;
+            V p = ir_alloca(f, ty, bytes);
+            if (n->data.let.value) {
+                V v = lower_expr(f, n->data.let.value);
+                if (ty == T_I8) v = ir_trunc(f, v);
+                ir_store(f, ty, v, p);
+            }
+            ir_bind(n->data.let.name, p, ty, ast);
+            break;
+        }
+        case NODE_BLOCK: {
+            int sn = ir_symn;
+            for (int i = 0; i < n->data.block.count; i++) lower_stmt(f, n->data.block.stmts[i]);
+            ir_symn = sn;
+            break;
+        }
+        case NODE_IF: {
+            V c = lower_expr(f, n->data.if_node.cond);
+            B *then = ir_newblock(f, "then");
+            B *els = n->data.if_node.else_ ? ir_newblock(f, "else") : NULL;
+            B *merge = ir_newblock(f, "merge");
+            I *cbr = ir_emit(f, OP_CBR); cbr->a = c; cbr->t1 = then->id; cbr->t2 = els ? els->id : merge->id;
+            f->cur = then; lower_stmt(f, n->data.if_node.then); if (!ir_terminated(f)) ir_emit(f, OP_BR)->t1 = merge->id;
+            if (els) { f->cur = els; lower_stmt(f, n->data.if_node.else_); if (!ir_terminated(f)) ir_emit(f, OP_BR)->t1 = merge->id; }
+            f->cur = merge;
+            break;
+        }
+        case NODE_WHILE: {
+            B *header = ir_newblock(f, "while.h");
+            B *body = ir_newblock(f, "while.b");
+            B *end = ir_newblock(f, "while.e");
+            ir_emit(f, OP_BR)->t1 = header->id;
+            f->cur = header;
+            V c = lower_expr(f, n->data.while_node.cond);
+            I *cbr = ir_emit(f, OP_CBR); cbr->a = c; cbr->t1 = body->id; cbr->t2 = end->id;
+            int sb = ir_brk, sc = ir_cont;
+            ir_brk = end->id; ir_cont = header->id;
+            f->cur = body; lower_stmt(f, n->data.while_node.body); if (!ir_terminated(f)) ir_emit(f, OP_BR)->t1 = header->id;
+            ir_brk = sb; ir_cont = sc;
+            f->cur = end;
+            break;
+        }
+        case NODE_FOR: {
+            if (n->data.for_node.init) lower_stmt(f, n->data.for_node.init);
+            B *header = ir_newblock(f, "for.h");
+            B *body = ir_newblock(f, "for.b");
+            B *cont = ir_newblock(f, "for.c");
+            B *end = ir_newblock(f, "for.e");
+            ir_emit(f, OP_BR)->t1 = header->id;
+            f->cur = header;
+            if (n->data.for_node.cond) {
+                V c = lower_expr(f, n->data.for_node.cond);
+                I *cbr = ir_emit(f, OP_CBR); cbr->a = c; cbr->t1 = body->id; cbr->t2 = end->id;
+            } else ir_emit(f, OP_BR)->t1 = body->id;
+            int sb = ir_brk, sc = ir_cont;
+            ir_brk = end->id; ir_cont = cont->id;
+            f->cur = body; lower_stmt(f, n->data.for_node.body); if (!ir_terminated(f)) ir_emit(f, OP_BR)->t1 = cont->id;
+            f->cur = cont;
+            if (n->data.for_node.inc) lower_expr(f, n->data.for_node.inc);
+            ir_emit(f, OP_BR)->t1 = header->id;
+            ir_brk = sb; ir_cont = sc;
+            f->cur = end;
+            break;
+        }
+        case NODE_RETURN: {
+            if (n->data.return_node.value) {
+                V v = lower_expr(f, n->data.return_node.value);
+                I *in = ir_emit(f, OP_RET); in->a = v; in->ty = T_I64;
+            } else {
+                ir_emit(f, OP_RET)->ty = T_VOID;
+            }
+            break;
+        }
+        case NODE_PRINT: lower_print(f, n); break;
+        case NODE_BREAK: ir_emit(f, OP_BR)->t1 = ir_brk; break;
+        case NODE_CONTINUE: ir_emit(f, OP_BR)->t1 = ir_cont; break;
+        case NODE_SWITCH: {
+            ASTNode **arms = n->data.switch_node.arms;
+            int na = n->data.switch_node.narms;
+            V v = lower_expr(f, n->data.switch_node.expr);
+            B *end = ir_newblock(f, "sw.e");
+            B *alab[64];
+            if (na > 64) die("too many switch arms", n->line);
+            int defidx = -1;
+            for (int k = 0; k < na; k++) {
+                alab[k] = ir_newblock(f, "sw.a");
+                if (arms[k]->data.case_arm.is_default) defidx = k;
+            }
+            int sb = ir_brk, sc = ir_cont;
+            ir_brk = end->id; ir_cont = end->id;
+            B *chain = ir_newblock(f, "sw.c");
+            ir_emit(f, OP_BR)->t1 = chain->id;
+            for (int k = 0; k < na; k++) {
+                f->cur = chain;
+                if (!arms[k]->data.case_arm.is_default) {
+                    V c = ir_icmp(f, C_EQ, v, kconst(arms[k]->data.case_arm.val));
+                    B *next = ir_newblock(f, "sw.c");
+                    I *cbr = ir_emit(f, OP_CBR); cbr->a = c; cbr->t1 = alab[k]->id; cbr->t2 = next->id;
+                    chain = next;
+                }
+            }
+            f->cur = chain;
+            ir_emit(f, OP_BR)->t1 = (defidx >= 0 ? alab[defidx] : end)->id;
+            for (int k = 0; k < na; k++) {
+                f->cur = alab[k];
+                lower_stmt(f, arms[k]->data.case_arm.blk);
+                if (!ir_terminated(f))
+                    ir_emit(f, OP_BR)->t1 = (k + 1 < na ? alab[k + 1] : end)->id;
+            }
+            ir_brk = sb; ir_cont = sc;
+            f->cur = end;
+            break;
+        }
+        case NODE_EXTERN_FUNC: case NODE_EXTERN_GLOB: break;
+        default: lower_expr(f, n); break;
+    }
+}
+
+static F *ir_newfunc(const char *nm, int np, char **params) {
+    F *fn = calloc(1, sizeof *fn);
+    fn->nm = nm; fn->np = np; fn->params = params;
+    if (ir_funcs) { F *p = ir_funcs; while (p->next) p = p->next; p->next = fn; }
+    else ir_funcs = fn;
+    return fn;
+}
+
+static const char *ir_bin_name(int sub) {
+    static const char *nm[] = { "add", "sub", "mul", "sdiv", "srem", "and", "or", "xor", "shl", "sar" };
+    return nm[sub];
+}
+static const char *ir_cmp_name(int sub) {
+    static const char *nm[] = { "eq", "ne", "slt", "sle", "sgt", "sge" };
+    return nm[sub];
+}
+static const char *ir_ty_name(ITy ty) {
+    static const char *nm[] = { "i1", "i8", "i64", "ptr", "void" };
+    return nm[ty];
+}
+static void ir_print_v(V v) {
+    if (v.k == K_CONST) printf("%ld", v.c);
+    else if (v.k == K_REG) printf("%%v%d", v.id);
+    else if (v.k == K_GLOBAL) printf("@%s", v.nm);
+    else if (v.k == K_FUNC) printf("@%s", v.nm);
+    else if (v.k == K_LIT) printf("@%s", v.nm);
+}
+static void ir_print_blk(int id) {
+    for (F *f = ir_funcs; f; f = f->next)
+        for (B *b = f->blocks; b; b = b->next)
+            if (b->id == id) { printf("label %%%s", b->nm); return; }
+    printf("label %%L%d", id);
+}
+
+static void ir_print_fn(F *f) {
+    printf("\nfunc @%s(", f->nm);
+    for (int i = 0; i < f->np; i++) printf("%s%s", i ? ", " : "", f->params[i]);
+    printf(") {\n");
+    for (B *b = f->blocks; b; b = b->next) {
+        printf("%s:\n", b->nm);
+        for (I *in = b->head; in; in = in->next) {
+                printf("  ");
+                switch (in->op) {
+                    case OP_BIN: printf("%%v%d = %s i64 ", in->dst, ir_bin_name(in->sub)); ir_print_v(in->a); printf(", "); ir_print_v(in->b); break;
+                    case OP_ICMP: printf("%%v%d = icmp %s i64 ", in->dst, ir_cmp_name(in->sub)); ir_print_v(in->a); printf(", "); ir_print_v(in->b); break;
+                    case OP_LOAD: printf("%%v%d = load %s, ", in->dst, ir_ty_name(in->ty)); ir_print_v(in->a); break;
+                    case OP_STORE: printf("store %s ", ir_ty_name(in->ty)); ir_print_v(in->a); printf(", "); ir_print_v(in->b); break;
+                    case OP_ALLOCA: printf("%%v%d = alloca %s", in->dst, ir_ty_name(in->ty)); break;
+                    case OP_CALL: printf("%%v%d = call i64 @%s(", in->dst, in->nm); for (int k = 0; k < in->nargs; k++) { if (k) printf(", "); ir_print_v(in->args[k]); } printf(")"); break;
+                    case OP_BR: printf("br "); ir_print_blk(in->t1); break;
+                    case OP_CBR: printf("cbr i1 "); ir_print_v(in->a); printf(", "); ir_print_blk(in->t1); printf(", "); ir_print_blk(in->t2); break;
+                    case OP_RET: if (in->ty == T_VOID) printf("ret void"); else { printf("ret i64 "); ir_print_v(in->a); } break;
+                    case OP_PRINT: printf("print %s ", in->sub ? "str" : "i64"); ir_print_v(in->a); break;
+                    case OP_ZEXT: printf("%%v%d = zext i8 ", in->dst); ir_print_v(in->a); printf(" to i64"); break;
+                    case OP_TRUNC: printf("%%v%d = trunc i64 ", in->dst); ir_print_v(in->a); printf(" to i8"); break;
+                    case OP_GADDR: printf("%%v%d = global.addr @%s", in->dst, in->nm); break;
+                    case OP_PTRADD: printf("%%v%d = ptradd ", in->dst); ir_print_v(in->a); printf(", "); ir_print_v(in->b); break;
+                    case OP_SYSCALL: printf("%%v%d = syscall(", in->dst); for (int k = 0; k < in->nargs; k++) { if (k) printf(", "); ir_print_v(in->args[k]); } printf(")"); break;
+                    case OP_COPY: printf("%%v%d = copy ", in->dst); ir_print_v(in->a); break;
+                    case OP_PHI:
+                        printf("%%v%d = phi i64 [ ", in->dst);
+                        for (int k = 0; k < in->nargs; k++) {
+                            if (k) printf(", ");
+                            ir_print_v(in->args[k]);
+                            printf(", ");
+                            ir_print_blk(in->ppred[k]);
+                        }
+                        printf(" ]");
+                        break;
+                    default: break;
+                }
+                printf("\n");
+            }
+        }
+        printf("}\n");
+}
+
+static void ir_print(void) {
+    for (int i = 0; i < ir_nstr; i++) {
+        printf("@.str%d = c\"", i);
+        for (int j = 0; j < ir_strs[i].len; j++) {
+            char c = ir_strs[i].data[j];
+            if (c == '\n') printf("\\0A");
+            else if (c < 32 || c > 126) printf("\\%02X", (unsigned char)c);
+            else putchar(c);
+        }
+        printf("\"\n");
+    }
+    for (int i = 0; i < ir_nglob; i++) {
+        printf("@%s = global %s", ir_globals[i].nm, ir_ty_name(ir_globals[i].ty));
+        if (ir_globals[i].has_init) printf(" %ld", ir_globals[i].init);
+        printf("\n");
+    }
+    for (F *f = ir_funcs; f; f = f->next) ir_print_fn(f);
+}
+
+static void ir_lower_function(ASTNode *n) {
+    F *f = ir_newfunc(n->data.function.name, n->data.function.pcount, n->data.function.params);
+    B *entry = ir_newblock(f, "entry");
+    f->cur = entry;
+    ir_symn = 0;
+    for (int i = 0; i < n->data.function.pcount; i++) {
+        V param = kreg(ir_nreg++);
+        V p = ir_alloca(f, T_I64, 8);
+        ir_store(f, T_I64, param, p);
+        if (i < 16) f->preg[i] = param.id;
+        ir_bind(n->data.function.params[i], p, T_I64, &TY_INT);
+    }
+    lower_stmt(f, n->data.function.body);
+    if (!ir_terminated(f)) {
+        I *in = ir_emit(f, OP_RET); in->ty = T_VOID;
+    }
+    ir_symn = 0;
+}
+
+static void ir_lower_program(ASTNode *root) {
+    ir_funcs = NULL; ir_nreg = 1; ir_nblk = 0; ir_nglob = 0; ir_nstr = 0;
+    nfn = 0;
+    for (int i = 0; i < root->data.block.count; i++) {
+        ASTNode *n = root->data.block.stmts[i];
+        if (n->type == NODE_LET) {
+            ir_globals[ir_nglob].nm = n->data.let.name;
+            ir_globals[ir_nglob].ty = ir_ty(n->data.let.ty);
+            ir_globals[ir_nglob].gast = n->data.let.ty;
+            ir_globals[ir_nglob].has_init = 0;
+            ir_nglob++;
+        } else if (n->type == NODE_FUNCTION) {
+            if (nfn >= (int)(sizeof FNS / sizeof *FNS)) die("too many functions", n->line);
+            FNS[nfn++] = (typeof(FNS[0])){ n->data.function.name, 0, n->data.function.pcount };
+        }
+    }
+    fn_hash_build();
+    for (int i = 0; i < root->data.block.count; i++) {
+        ASTNode *n = root->data.block.stmts[i];
+        if (n->type == NODE_FUNCTION) ir_lower_function(n);
+    }
+    F *entry = ir_newfunc("entry", 0, NULL);
+    B *eb = ir_newblock(entry, "entry");
+    entry->cur = eb;
+    ir_symn = 0;
+    for (int i = 0; i < root->data.block.count; i++) {
+        ASTNode *n = root->data.block.stmts[i];
+        if (n->type == NODE_FUNCTION || n->type == NODE_EXTERN_FUNC || n->type == NODE_EXTERN_GLOB) continue;
+        if (n->type == NODE_LET) {
+            if (!n->data.let.value) continue;
+            for (int g = 0; g < ir_nglob; g++) {
+                if (!strcmp(ir_globals[g].nm, n->data.let.name)) {
+                    V v = lower_expr(entry, n->data.let.value);
+                    if (ir_globals[g].ty == T_I8) v = ir_trunc(entry, v);
+                    V p = ir_gaddr(entry, n->data.let.name);
+                    ir_store(entry, ir_globals[g].ty, v, p);
+                    break;
+                }
+            }
+        } else {
+            lower_stmt(entry, n);
+        }
+    }
+    I *ret = ir_emit(entry, OP_RET); ret->ty = T_VOID;
+    ir_symn = 0;
+}
+
+#define IRBLK 1024
+static B *cg_b[IRBLK];
+static int cg_np[IRBLK], cg_ns[IRBLK], cg_p[IRBLK][6], cg_s[IRBLK][2], cg_n;
+static int cg_reach[IRBLK], cg_idom[IRBLK], cg_ndf[IRBLK], cg_df[IRBLK][16];
+static int cg_children[IRBLK][IRBLK], cg_nch[IRBLK];
+static uint64_t cg_dom[IRBLK][IRBLK / 64];
+static int id2x[65536];
+
+static void ir_cfg(F *f) {
+    cg_n = 0;
+    for (B *b = f->blocks; b; b = b->next) {
+        if (cg_n >= IRBLK) die("too many blocks", 0);
+        id2x[b->id] = cg_n; cg_b[cg_n++] = b;
+    }
+    for (int i = 0; i < cg_n; i++) { cg_np[i] = 0; cg_ns[i] = 0; }
+    for (int i = 0; i < cg_n; i++) {
+        B *b = cg_b[i];
+        if (!b->tail) continue;
+        if (b->tail->op == OP_BR) cg_s[i][cg_ns[i]++] = id2x[b->tail->t1];
+        else if (b->tail->op == OP_CBR) {
+            cg_s[i][cg_ns[i]++] = id2x[b->tail->t1];
+            cg_s[i][cg_ns[i]++] = id2x[b->tail->t2];
+        }
+    }
+    for (int i = 0; i < cg_n; i++)
+        for (int j = 0; j < cg_ns[i]; j++) {
+            int t = cg_s[i][j];
+            if (cg_np[t] >= 6) die("too many predecessors", 0);
+            cg_p[t][cg_np[t]++] = i;
+        }
+}
+
+static void ir_split_edges(F *f) {
+    ir_cfg(f);
+    struct { I *in; int t; } spl[512];
+    int ns = 0;
+    for (int i = 0; i < cg_n; i++) {
+        if (cg_ns[i] != 2) continue;
+        for (int j = 0; j < 2; j++) {
+            int t = cg_s[i][j];
+            if (cg_np[t] > 1 && ns < 512) { spl[ns].in = cg_b[i]->tail; spl[ns].t = t; ns++; }
+        }
+    }
+    for (int k = 0; k < ns; k++) {
+        B *m = ir_newblock(f, "split");
+        f->cur = m;
+        I *br = ir_emit(f, OP_BR);
+        br->t1 = spl[k].t;
+        if (spl[k].in->t1 == spl[k].t) spl[k].in->t1 = m->id;
+        else spl[k].in->t2 = m->id;
+    }
+}
+
+static void ir_prune(F *f) {
+    ir_cfg(f);
+    for (int i = 0; i < cg_n; i++) cg_reach[i] = 0;
+    int stk[IRBLK], sp = 0;
+    if (cg_n) { stk[sp++] = 0; cg_reach[0] = 1; }
+    while (sp) {
+        int i = stk[--sp];
+        for (int j = 0; j < cg_ns[i]; j++) {
+            int t = cg_s[i][j];
+            if (!cg_reach[t]) { cg_reach[t] = 1; stk[sp++] = t; }
+        }
+    }
+    B **pp = &f->blocks;
+    while (*pp) {
+        B *b = *pp;
+        if (!cg_reach[id2x[b->id]]) *pp = b->next;
+        else pp = &b->next;
+    }
+    ir_cfg(f);
+    for (B *b = f->blocks; b; b = b->next) {
+        for (I *in = b->head; in && in->op == OP_PHI; in = in->next) {
+            int w = 0;
+            for (int k = 0; k < in->nargs; k++) {
+                int px = id2x[in->ppred[k]];
+                int keep = px >= 0 && px < cg_n && cg_b[px] && cg_b[px]->id == in->ppred[k] && cg_reach[px];
+                for (int j = 0; keep && j < cg_np[px]; j++)
+                    if (cg_s[px][j] == id2x[b->id]) { keep = 2; break; }
+                if (keep == 2) { in->args[w] = in->args[k]; in->ppred[w] = in->ppred[k]; w++; }
+            }
+            in->nargs = w;
+        }
+    }
+}
+
+static void ir_dominators(void) {
+    int nw = (cg_n + 63) / 64;
+    for (int i = 0; i < cg_n; i++) {
+        if (!cg_reach[i]) { memset(cg_dom[i], 0, sizeof(uint64_t) * nw); continue; }
+        if (i == 0) { memset(cg_dom[i], 0, sizeof(uint64_t) * nw); cg_dom[i][0] = 1; }
+        else for (int w = 0; w < nw; w++) cg_dom[i][w] = ~0ULL;
+    }
+    for (int iter = 0; iter < cg_n + 2; iter++) {
+        int changed = 0;
+        for (int i = 1; i < cg_n; i++) {
+            if (!cg_reach[i]) continue;
+            uint64_t nb[IRBLK / 64];
+            for (int w = 0; w < nw; w++) nb[w] = ~0ULL;
+            int any = 0;
+            for (int j = 0; j < cg_np[i]; j++) {
+                int p = cg_p[i][j];
+                if (!cg_reach[p]) continue;
+                for (int w = 0; w < nw; w++) nb[w] &= cg_dom[p][w];
+                any = 1;
+            }
+            if (!any) for (int w = 0; w < nw; w++) nb[w] = 0;
+            nb[i / 64] |= 1ULL << (i % 64);
+            for (int w = 0; w < nw; w++)
+                if (nb[w] != cg_dom[i][w]) { cg_dom[i][w] = nb[w]; changed = 1; }
+        }
+        if (!changed) break;
+    }
+    for (int i = 0; i < cg_n; i++) cg_idom[i] = -1;
+    cg_idom[0] = 0;
+    for (int i = 1; i < cg_n; i++) {
+        if (!cg_reach[i]) continue;
+        for (int d = 0; d < cg_n; d++) {
+            if (d == i || !cg_reach[d]) continue;
+            if (!(cg_dom[i][d / 64] >> (d % 64) & 1)) continue;
+            int same = 1;
+            for (int w = 0; w < (cg_n + 63) / 64 && same; w++) {
+                uint64_t x = cg_dom[i][w], y = cg_dom[d][w];
+                if (i / 64 == w) x &= ~(1ULL << (i % 64));
+                if (x != y) same = 0;
+            }
+            if (same) { cg_idom[i] = d; break; }
+        }
+    }
+    for (int i = 0; i < cg_n; i++) { cg_nch[i] = 0; cg_ndf[i] = 0; }
+    for (int i = 1; i < cg_n; i++)
+        if (cg_reach[i] && cg_idom[i] >= 0) cg_children[cg_idom[i]][cg_nch[cg_idom[i]]++] = i;
+    for (int i = 0; i < cg_n; i++) {
+        if (!cg_reach[i] || cg_np[i] < 2) continue;
+        for (int j = 0; j < cg_np[i]; j++) {
+            int runner = cg_p[i][j];
+            while (runner != cg_idom[i]) {
+                if (cg_ndf[runner] < 16) cg_df[runner][cg_ndf[runner]++] = i;
+                if (runner == 0) break;
+                runner = cg_idom[runner];
+            }
+        }
+    }
+}
+
+static void ir_unlink_dead(F *f) {
+    for (B *b = f->blocks; b; b = b->next) {
+        I *prev = NULL, *in = b->head;
+        while (in) {
+            I *nx = in->next;
+            if (in->op == OP_DEAD) {
+                if (prev) prev->next = nx; else b->head = nx;
+                if (b->tail == in) b->tail = prev;
+            } else prev = in;
+            in = nx;
+        }
+    }
+}
+
+static void ir_insert_before_tail(B *b, I *in) {
+    if (!b->head) { b->head = b->tail = in; return; }
+    if (b->head == b->tail) { in->next = b->tail; b->head = in; return; }
+    I *p = b->head;
+    while (p->next != b->tail) p = p->next;
+    in->next = b->tail; p->next = in;
+}
+
+static V dmap_val[65536];
+static unsigned char dmap_ok[65536];
+
+static V ir_rd(V v) {
+    while (v.k == K_REG && dmap_ok[v.id]) v = dmap_val[v.id];
+    return v;
+}
+
+static void ir_rewrite_ops(I *in) {
+    in->a = ir_rd(in->a);
+    in->b = ir_rd(in->b);
+    for (int k = 0; k < in->nargs; k++) in->args[k] = ir_rd(in->args[k]);
+}
+
+static void ir_mem2reg(F *f) {
+    ir_cfg(f);
+    ir_dominators();
+    I *allocas[512];
+    int na = 0;
+    for (B *b = f->blocks; b; b = b->next)
+        for (I *in = b->head; in; in = in->next)
+            if (in->op == OP_ALLOCA) {
+                if (na >= 512) die("too many allocas", 0);
+                allocas[na++] = in;
+            }
+    int amap[65536];
+    for (int i = 0; i < 65536; i++) amap[i] = -1;
+    for (int i = 0; i < na; i++) amap[allocas[i]->dst] = i;
+
+    static V stk[512][512];
+    static int sp[512], cap[512];
+    static unsigned char promoted[512];
+    for (int i = 0; i < na; i++) { sp[i] = 0; cap[i] = 8; promoted[i] = 0; }
+
+    for (int ai = 0; ai < na; ai++) {
+        I *A = allocas[ai];
+        int ok = 1;
+        for (B *b = f->blocks; b && ok; b = b->next)
+            for (I *in = b->head; in && ok; in = in->next) {
+                if (in == A) continue;
+                int ua = in->a.k == K_REG && in->a.id == A->dst;
+                int ub = in->b.k == K_REG && in->b.id == A->dst;
+                if (in->op == OP_LOAD && ua) continue;
+                if (in->op == OP_STORE && ub) continue;
+                if (ua || ub) ok = 0;
+                for (int k = 0; k < in->nargs; k++)
+                    if (in->args[k].k == K_REG && in->args[k].id == A->dst) ok = 0;
+            }
+        if (!ok) continue;
+        promoted[ai] = 1;
+        for (B *b = f->blocks; b; b = b->next)
+            for (I *in = b->head; in; in = in->next)
+                if (in->op == OP_STORE && in->b.k == K_REG && in->b.id == A->dst) cap[ai]++;
+        unsigned char hasphi[IRBLK];
+        memset(hasphi, 0, sizeof hasphi);
+        unsigned char inwf[IRBLK];
+        memset(inwf, 0, sizeof inwf);
+        int wlist[IRBLK], wsp = 0;
+        for (B *b = f->blocks; b; b = b->next)
+            for (I *in = b->head; in; in = in->next)
+                if (in->op == OP_STORE && in->b.k == K_REG && in->b.id == A->dst) {
+                    int bi = id2x[b->id];
+                    if (!inwf[bi]) { inwf[bi] = 1; wlist[wsp++] = bi; }
+                }
+        while (wsp) {
+            int x = wlist[--wsp];
+            for (int j = 0; j < cg_ndf[x]; j++) {
+                int y = cg_df[x][j];
+                if (hasphi[y]) continue;
+                hasphi[y] = 1;
+                I *phi = calloc(1, sizeof *phi);
+                phi->op = OP_PHI; phi->ty = A->ty;
+                phi->dst = ir_nreg++;
+                phi->b = kreg(A->dst);
+                phi->nargs = cg_np[y];
+                phi->args = malloc(sizeof(V) * cg_np[y]);
+                phi->ppred = malloc(sizeof(int) * cg_np[y]);
+                for (int k = 0; k < cg_np[y]; k++) { phi->args[k] = kconst(0); phi->ppred[k] = cg_b[cg_p[y][k]]->id; }
+                B *yb = cg_b[y];
+                phi->next = yb->head;
+                yb->head = phi;
+                if (!yb->tail) yb->tail = phi;
+                if (!inwf[y]) { inwf[y] = 1; wlist[wsp++] = y; }
+            }
+        }
+    }
+
+    for (int i = 0; i < 65536; i++) dmap_ok[i] = 0;
+
+    int pidx[512];
+
+    void rename(int bi) {
+        for (int ai = 0; ai < na; ai++) pidx[ai] = sp[ai];
+        B *b = cg_b[bi];
+        for (I *in = b->head; in && in->op == OP_PHI; in = in->next) {
+            int ai = amap[in->b.id];
+            if (ai >= 0 && promoted[ai]) {
+                if (sp[ai] >= cap[ai]) die("alloca stack overflow", 0);
+                stk[ai][sp[ai]++] = kreg(in->dst);
+            }
+        }
+        for (I *in = b->head; in; in = in->next) {
+            if (in->op == OP_STORE && in->b.k == K_REG && amap[in->b.id] >= 0 && promoted[amap[in->b.id]]) {
+                int ai = amap[in->b.id];
+                if (sp[ai] >= cap[ai]) die("alloca stack overflow", 0);
+                stk[ai][sp[ai]++] = ir_rd(in->a);
+                in->op = OP_DEAD;
+                continue;
+            }
+            if (in->op == OP_LOAD && in->a.k == K_REG && amap[in->a.id] >= 0 && promoted[amap[in->a.id]]) {
+                int ai = amap[in->a.id];
+                dmap_val[in->dst] = sp[ai] ? stk[ai][sp[ai] - 1] : kconst(0);
+                dmap_ok[in->dst] = 1;
+                in->op = OP_DEAD;
+                continue;
+            }
+            ir_rewrite_ops(in);
+        }
+        for (int j = 0; j < cg_ns[bi]; j++) {
+            int s = cg_s[bi][j];
+            B *sb = cg_b[s];
+            for (I *in = sb->head; in && in->op == OP_PHI; in = in->next) {
+                int ai = amap[in->b.id];
+                if (ai < 0 || !promoted[ai]) continue;
+                for (int k = 0; k < in->nargs; k++)
+                    if (in->ppred[k] == b->id) {
+                        in->args[k] = sp[ai] ? stk[ai][sp[ai] - 1] : kconst(0);
+                        break;
+                    }
+            }
+        }
+        for (int c = 0; c < cg_nch[bi]; c++) rename(cg_children[bi][c]);
+        for (int ai = 0; ai < na; ai++) sp[ai] = pidx[ai];
+    }
+    if (cg_n) rename(0);
+    ir_unlink_dead(f);
+    ir_cfg(f);
+}
+
+static void ir_ssa_apply_reps(F *f) {
+    for (B *b = f->blocks; b; b = b->next)
+        for (I *in = b->head; in; in = in->next)
+            ir_rewrite_ops(in);
+}
+
+static void ir_ssa_fold(F *f) {
+    for (int iter = 0; iter < 16; iter++) {
+        int changed = 0;
+        for (int i = 0; i < 65536; i++) dmap_ok[i] = 0;
+        for (B *b = f->blocks; b; b = b->next) {
+            for (I *in = b->head; in; in = in->next) {
+                if (in->op == OP_BIN && in->a.k == K_CONST && in->b.k == K_CONST) {
+                    long x = in->a.c, y = in->b.c, r = 0;
+                    int fold = 1;
+                    switch (in->sub) {
+                        case B_ADD: r = x + y; break;
+                        case B_SUB: r = x - y; break;
+                        case B_MUL: r = x * y; break;
+                        case B_SDIV: if (!y) fold = 0; else r = x / y; break;
+                        case B_SREM: if (!y) fold = 0; else r = x % y; break;
+                        case B_AND: r = x & y; break;
+                        case B_OR: r = x | y; break;
+                        case B_XOR: r = x ^ y; break;
+                        case B_SHL: r = x << (y & 63); break;
+                        case B_SAR: r = x >> (y & 63); break;
+                    }
+                    if (fold) { dmap_val[in->dst] = kconst(r); dmap_ok[in->dst] = 1; in->op = OP_DEAD; changed = 1; continue; }
+                }
+                if (in->op == OP_ICMP && in->a.k == K_CONST && in->b.k == K_CONST) {
+                    long x = in->a.c, y = in->b.c, r = 0;
+                    switch (in->sub) {
+                        case C_EQ: r = x == y; break;
+                        case C_NE: r = x != y; break;
+                        case C_SLT: r = x < y; break;
+                        case C_SLE: r = x <= y; break;
+                        case C_SGT: r = x > y; break;
+                        case C_SGE: r = x >= y; break;
+                    }
+                    dmap_val[in->dst] = kconst(r); dmap_ok[in->dst] = 1;
+                    in->op = OP_DEAD; changed = 1; continue;
+                }
+                if ((in->op == OP_ZEXT || in->op == OP_TRUNC) && in->a.k == K_CONST) {
+                    dmap_val[in->dst] = kconst(in->a.c & 0xFF); dmap_ok[in->dst] = 1;
+                    in->op = OP_DEAD; changed = 1; continue;
+                }
+                if (in->op == OP_CBR && in->a.k == K_CONST) {
+                    in->op = OP_BR;
+                    if (!in->a.c) in->t1 = in->t2;
+                    changed = 1; continue;
+                }
+                if (in->op == OP_PHI) {
+                    V same = kconst(0); int found = 0, allsame = 1;
+                    for (int k = 0; k < in->nargs; k++) {
+                        V v = in->args[k];
+                        if (v.k == K_REG && v.id == in->dst) continue;
+                        if (!found) { same = v; found = 1; }
+                        else if (v.k != same.k || v.c != same.c || v.id != same.id) allsame = 0;
+                    }
+                    if (found && allsame) {
+                        dmap_val[in->dst] = same; dmap_ok[in->dst] = 1;
+                        in->op = OP_DEAD; changed = 1;
+                    }
+                    continue;
+                }
+            }
+        }
+        if (!changed) break;
+        ir_ssa_apply_reps(f);
+        ir_unlink_dead(f);
+        ir_prune(f);
+        for (B *b = f->blocks; b; b = b->next)
+            for (I *in = b->head; in; in = in->next)
+                if (in->op == OP_PHI && in->nargs == 0) in->op = OP_DEAD;
+        ir_unlink_dead(f);
+    }
+}
+
+static void ir_ssa_gvn(F *f) {
+    static struct { int op, sub, ty; long ka, kb, va, vb; int dst; int depth; } tbl[8192];
+    int nt = 0;
+    struct { int reg; V to; } reps[8192];
+    int nr = 0;
+    int comm[11] = { 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0 };
+
+    void enter(int bi, int depth) {
+        for (I *in = cg_b[bi]->head; in; in = in->next) {
+            if (in->op != OP_BIN && in->op != OP_ICMP && in->op != OP_ZEXT && in->op != OP_TRUNC && in->op != OP_PTRADD && in->op != OP_GADDR) continue;
+            long ka, kb;
+            ka = in->a.k == K_CONST ? (0x4000000000L + in->a.c) : (0x8000000000L + in->a.id);
+            kb = in->b.k == K_CONST ? (0x4000000000L + in->b.c) : (0x8000000000L + in->b.id);
+            if (in->a.k == K_LIT) ka = 0xC000000000L + in->a.c;
+            if (in->b.k == K_LIT) kb = 0xC000000000L + in->b.c;
+            if (in->op == OP_GADDR) { ka = 0xD000000000L; kb = (long)(size_t)in->nm; }
+            if (in->op != OP_GADDR && comm[in->op == OP_BIN ? in->sub : 10] && ka > kb) { long t = ka; ka = kb; kb = t; }
+            int hit = -1;
+            for (int i = nt - 1; i >= 0; i--) {
+                if (tbl[i].op == in->op && tbl[i].sub == in->sub && tbl[i].ty == in->ty && tbl[i].ka == ka && tbl[i].kb == kb) { hit = i; break; }
+            }
+            if (hit >= 0) {
+                if (nr < 8192) { reps[nr].reg = in->dst; reps[nr].to = kreg(tbl[hit].dst); nr++; }
+                in->op = OP_DEAD;
+                continue;
+            }
+            if (nt < 8192) {
+                tbl[nt].op = in->op; tbl[nt].sub = in->sub; tbl[nt].ty = in->ty;
+                tbl[nt].ka = ka; tbl[nt].kb = kb; tbl[nt].dst = in->dst; tbl[nt].depth = depth;
+                nt++;
+            }
+        }
+        for (int c = 0; c < cg_nch[bi]; c++) enter(cg_children[bi][c], depth + 1);
+        while (nt > 0 && tbl[nt - 1].depth >= depth) nt--;
+    }
+    for (int i = 0; i < 65536; i++) dmap_ok[i] = 0;
+    if (cg_n) enter(0, 0);
+    for (int i = 0; i < nr; i++) { dmap_val[reps[i].reg] = reps[i].to; dmap_ok[reps[i].reg] = 1; }
+    ir_ssa_apply_reps(f);
+    ir_unlink_dead(f);
+}
+
+static void ir_ssa_dce(F *f) {
+    static I *imap[65536];
+    for (int i = 0; i < 65536; i++) imap[i] = NULL;
+    for (B *b = f->blocks; b; b = b->next)
+        for (I *in = b->head; in; in = in->next)
+            if (in->dst >= 0 && in->dst < 65536) imap[in->dst] = in;
+    for (B *b = f->blocks; b; b = b->next)
+        for (I *in = b->head; in; in = in->next) in->mk = 0;
+    static I *wl[262144];
+    int wsp = 0;
+    #define IRMARK(x) do { I *_i = (x); if (_i && !_i->mk) { _i->mk = 1; wl[wsp++] = _i; } } while (0)
+    for (B *b = f->blocks; b; b = b->next)
+        for (I *in = b->head; in; in = in->next)
+            if (in->op == OP_STORE || in->op == OP_CALL || in->op == OP_PRINT || in->op == OP_SYSCALL ||
+                in->op == OP_RET || in->op == OP_BR || in->op == OP_CBR || in->op == OP_ALLOCA)
+                IRMARK(in);
+    while (wsp) {
+        I *in = wl[--wsp];
+        if (in->a.k == K_REG && imap[in->a.id]) IRMARK(imap[in->a.id]);
+        if (in->b.k == K_REG && imap[in->b.id]) IRMARK(imap[in->b.id]);
+        for (int k = 0; k < in->nargs; k++)
+            if (in->args[k].k == K_REG && imap[in->args[k].id]) IRMARK(imap[in->args[k].id]);
+    }
+    for (B *b = f->blocks; b; b = b->next)
+        for (I *in = b->head; in; in = in->next)
+            if (!in->mk && in->op != OP_STORE && in->op != OP_CALL && in->op != OP_PRINT && in->op != OP_SYSCALL &&
+                in->op != OP_RET && in->op != OP_BR && in->op != OP_CBR && in->op != OP_ALLOCA)
+                in->op = OP_DEAD;
+    ir_unlink_dead(f);
+}
+
+static void ir_out_of_ssa(F *f) {
+    int any = 1;
+    while (any) {
+        any = 0;
+        for (B *b = f->blocks; b; b = b->next) {
+            if (!b->head || b->head->op != OP_PHI) continue;
+            any = 1;
+            I *phis[512];
+            int np = 0;
+            for (I *in = b->head; in && in->op == OP_PHI; in = in->next)
+                if (np < 512) phis[np++] = in;
+            for (int k = 0; k < np; k++) phis[k]->mk = ir_nreg++;
+            for (int pass = 0; pass < 2; pass++) {
+                for (int k = 0; k < np; k++) {
+                    I *phi = phis[k];
+                    for (int e = 0; e < phi->nargs; e++) {
+                        B *pb = NULL;
+                        for (B *bb = f->blocks; bb; bb = bb->next)
+                            if (bb->id == phi->ppred[e]) { pb = bb; break; }
+                        if (!pb) continue;
+                        I *cp = calloc(1, sizeof *cp);
+                        cp->op = OP_COPY; cp->dst = pass ? phi->dst : (int)phis[k]->mk;
+                        cp->ty = phi->ty;
+                        cp->a = pass ? kreg((int)phis[k]->mk) : phi->args[e];
+                        ir_insert_before_tail(pb, cp);
+                    }
+                }
+            }
+            for (int k = 0; k < np; k++) phis[k]->op = OP_DEAD;
+            break;
+        }
+    }
+    ir_unlink_dead(f);
+}
+
+static void ir_opt_function(F *f) {
+    int dump = getenv("LGC_DUMP_SSA") != NULL;
+    ir_split_edges(f);
+    ir_prune(f);
+    if (dump) { printf("==== %s after split/prune ====\n", f->nm); ir_print_fn(f); }
+    ir_mem2reg(f);
+    if (dump) { printf("==== %s after mem2reg ====\n", f->nm); ir_print_fn(f); }
+    ir_ssa_fold(f);
+    if (dump) { printf("==== %s after fold ====\n", f->nm); ir_print_fn(f); }
+    ir_ssa_gvn(f);
+    if (dump) { printf("==== %s after gvn ====\n", f->nm); ir_print_fn(f); }
+    ir_ssa_dce(f);
+    if (dump) { printf("==== %s after dce ====\n", f->nm); ir_print_fn(f); }
+}
+
+static void ir_pipeline(ASTNode *root) {
+    ir_lower_program(root);
+    for (F *f = ir_funcs; f; f = f->next) ir_opt_function(f);
+    for (F *f = ir_funcs; f; f = f->next) ir_out_of_ssa(f);
+}
+
+static void ir_ldv_rax(V v, long *off) {
+    if (v.k == K_CONST) mov_rax_imm(v.c);
+    else if (v.k == K_LIT) { EMIT(0x48, 0x8D, 0x05); emit_patch(1, (int)v.c); }
+    else { EMIT(0x48, 0x8B); rbp_disp(0, (int)off[v.id]); }
+}
+
+static void ir_ldv_rcx(V v, long *off) {
+    if (v.k == K_CONST) {
+        if (v.c >= -2147483648LL && v.c <= 2147483647LL) { EMIT(0x48, 0xC7, 0xC1); emit_imm(v.c, 4); }
+        else { EMIT(0x48, 0xB9); emit_imm(v.c, 8); }
+    } else if (v.k == K_LIT) { EMIT(0x48, 0x8D, 0x0D); emit_patch(1, (int)v.c); }
+    else { EMIT(0x48, 0x8B); rbp_disp(1, (int)off[v.id]); }
+}
+
+static void ir_st_rax(int dst, long *off) {
+    EMIT(0x48, 0x89);
+    rbp_disp(0, (int)off[dst]);
+}
+
+static int ir_exit_lab = -1;
+
+static void ir_emit_fn(F *f, int is_entry) {
+    int maxr = 1;
+    for (B *b = f->blocks; b; b = b->next)
+        for (I *in = b->head; in; in = in->next) {
+            if (in->dst > maxr) maxr = in->dst;
+            if (in->a.k == K_REG && in->a.id > maxr) maxr = in->a.id;
+            if (in->b.k == K_REG && in->b.id > maxr) maxr = in->b.id;
+            for (int k = 0; k < in->nargs; k++)
+                if (in->args[k].k == K_REG && in->args[k].id > maxr) maxr = in->args[k].id;
+        }
+    long *off = calloc((size_t)maxr + 2, sizeof(long));
+    long framesz = 0;
+    for (B *b = f->blocks; b; b = b->next)
+        for (I *in = b->head; in; in = in->next) {
+            if (in->op == OP_ALLOCA && !off[in->dst]) {
+                framesz += in->bytes ? in->bytes : 8;
+                off[in->dst] = -framesz;
+            }
+        }
+    for (B *b = f->blocks; b; b = b->next)
+        for (I *in = b->head; in; in = in->next) {
+            if (in->dst >= 0 && !off[in->dst] && in->op != OP_ALLOCA) {
+                framesz += 8;
+                off[in->dst] = -framesz;
+            }
+            if (in->a.k == K_REG && !off[in->a.id]) { framesz += 8; off[in->a.id] = -framesz; }
+            if (in->b.k == K_REG && !off[in->b.id]) { framesz += 8; off[in->b.id] = -framesz; }
+            for (int k = 0; k < in->nargs; k++)
+                if (in->args[k].k == K_REG && !off[in->args[k].id]) { framesz += 8; off[in->args[k].id] = -framesz; }
+        }
+    framesz = (framesz + 15) & ~15L;
+    int blab[IRBLK], nb = 0;
+    for (B *b = f->blocks; b; b = b->next) blab[nb++] = new_label();
+    int epilab = new_label();
+    EMIT(0x55);
+    EMIT(0x48, 0x89, 0xE5);
+    if (framesz) { EMIT(0x48, 0x81, 0xEC); emit_imm(framesz, 4); }
+    if (!is_entry) {
+        static const int preg[6] = { 7, 6, 2, 1, 8, 9 };
+        if (f->np > 6) die("IR backend supports at most 6 parameters", 0);
+        for (int i = 0; i < f->np && i < 6; i++) {
+            EMIT(preg[i] >= 8 ? 0x4C : 0x48, 0x89);
+            rbp_disp(preg[i] & 7, (int)off[f->preg[i]]);
+        }
+    }
+    int bi = 0;
+    for (B *b = f->blocks; b; b = b->next, bi++) {
+        put_label(blab[bi]);
+        for (I *in = b->head; in; in = in->next) {
+            switch (in->op) {
+                case OP_BIN: {
+                    ir_ldv_rax(in->a, off);
+                    ir_ldv_rcx(in->b, off);
+                    switch (in->sub) {
+                        case B_ADD: EMIT(0x48, 0x01, 0xC8); break;
+                        case B_SUB: EMIT(0x48, 0x29, 0xC8); break;
+                        case B_MUL: EMIT(0x48, 0x0F, 0xAF, 0xC1); break;
+                        case B_AND: EMIT(0x48, 0x21, 0xC8); break;
+                        case B_OR: EMIT(0x48, 0x09, 0xC8); break;
+                        case B_XOR: EMIT(0x48, 0x31, 0xC8); break;
+                        case B_SHL: EMIT(0x48, 0xD3, 0xE0); break;
+                        case B_SAR: EMIT(0x48, 0xD3, 0xF8); break;
+                        case B_SDIV: EMIT(0x48, 0x99); EMIT(0x48, 0xF7, 0xF9); break;
+                        case B_SREM: EMIT(0x48, 0x99); EMIT(0x48, 0xF7, 0xF9); EMIT(0x48, 0x89, 0xD0); break;
+                    }
+                    ir_st_rax(in->dst, off);
+                    break;
+                }
+                case OP_ICMP: {
+                    ir_ldv_rax(in->a, off);
+                    ir_ldv_rcx(in->b, off);
+                    EMIT(0x48, 0x39, 0xC8);
+                    static const int cc[6] = { 0x94, 0x95, 0x9C, 0x9E, 0x9F, 0x9D };
+                    EMIT(0x0F, cc[in->sub], 0xC0);
+                    EMIT(0x0F, 0xB6, 0xC0);
+                    ir_st_rax(in->dst, off);
+                    break;
+                }
+                case OP_LOAD: {
+                    ir_ldv_rax(in->a, off);
+                    if (in->ty == T_I8) EMIT(0x0F, 0xB6, 0x00);
+                    else EMIT(0x48, 0x8B, 0x00);
+                    ir_st_rax(in->dst, off);
+                    break;
+                }
+                case OP_STORE: {
+                    ir_ldv_rax(in->a, off);
+                    ir_ldv_rcx(in->b, off);
+                    if (in->ty == T_I8) EMIT(0x88, 0x01);
+                    else EMIT(0x48, 0x89, 0x01);
+                    break;
+                }
+                case OP_ALLOCA: {
+                    EMIT(0x48, 0x8D);
+                    rbp_disp(0, (int)off[in->dst]);
+                    ir_st_rax(in->dst, off);
+                    break;
+                }
+                case OP_PTRADD: {
+                    ir_ldv_rax(in->a, off);
+                    ir_ldv_rcx(in->b, off);
+                    EMIT(0x48, 0x01, 0xC8);
+                    ir_st_rax(in->dst, off);
+                    break;
+                }
+                case OP_COPY: {
+                    ir_ldv_rax(in->a, off);
+                    ir_st_rax(in->dst, off);
+                    break;
+                }
+                case OP_ZEXT: case OP_TRUNC: {
+                    ir_ldv_rax(in->a, off);
+                    EMIT(0x0F, 0xB6, 0xC0);
+                    ir_st_rax(in->dst, off);
+                    break;
+                }
+                case OP_GADDR: {
+                    Glob *g = glob_find(in->nm);
+                    if (!g) die("undefined global", 0);
+                    EMIT(0x48, 0x8D, 0x05);
+                    emit_patch(2, g->off);
+                    ir_st_rax(in->dst, off);
+                    break;
+                }
+                case OP_CALL: {
+                    static const int areg[6][2] = { {7,0},{6,0},{2,0},{1,0},{8,1},{9,1} };
+                    if (in->nargs > 6) die("IR backend supports at most 6 arguments", 0);
+                    for (int k = 0; k < in->nargs; k++) {
+                        ir_ldv_rax(in->args[k], off);
+                        if (areg[k][1]) EMIT(0x49, 0x89, (uint8_t)(0xC0 | (areg[k][0] & 7)));
+                        else EMIT(0x48, 0x89, (uint8_t)(0xC0 | areg[k][0]));
+                    }
+                    int fi = fn_find(in->nm);
+                    if (fi < 0) die("call to undefined function", 0);
+                    EMIT(0xE8);
+                    emit_patch(0, FNS[fi].lab);
+                    ir_st_rax(in->dst, off);
+                    break;
+                }
+                case OP_SYSCALL: {
+                    if (in->nargs != 4) die("syscall(nr, a, b, c)", 0);
+                    ir_ldv_rax(in->args[0], off);
+                    static const int smv[3] = { 0xCF, 0xCE, 0xCA };
+                    for (int k = 1; k < 4; k++) {
+                        ir_ldv_rcx(in->args[k], off);
+                        EMIT(0x48, 0x89, smv[k - 1]);
+                    }
+                    EMIT(0x0F, 0x05);
+                    ir_st_rax(in->dst, off);
+                    break;
+                }
+                case OP_PRINT: {
+                    if (freestanding) die("print is unavailable in freestanding mode", 0);
+                    ir_ldv_rax(in->a, off);
+                    EMIT(0xE8);
+                    emit_patch(0, in->sub ? printstrlab : printlab);
+                    break;
+                }
+                case OP_BR: {
+                    int t = 0, idx = 0;
+                    for (B *bb = f->blocks; bb; bb = bb->next, idx++)
+                        if (bb->id == in->t1) { t = idx; break; }
+                    EMIT(0xE9);
+                    emit_rel32(blab[t]);
+                    break;
+                }
+                case OP_CBR: {
+                    ir_ldv_rax(in->a, off);
+                    EMIT(0x48, 0x85, 0xC0);
+                    int tt1 = 0, tt2 = 0, idx = 0;
+                    for (B *bb = f->blocks; bb; bb = bb->next, idx++) {
+                        if (bb->id == in->t1) tt1 = idx;
+                        if (bb->id == in->t2) tt2 = idx;
+                    }
+                    EMIT(0x0F, 0x84);
+                    emit_rel32(blab[tt2]);
+                    EMIT(0xE9);
+                    emit_rel32(blab[tt1]);
+                    break;
+                }
+                case OP_RET: {
+                    if (is_entry) {
+                        if (in->ty != T_VOID) ir_ldv_rax(in->a, off);
+                        EMIT(0xE9);
+                        emit_rel32(ir_exit_lab);
+                        break;
+                    }
+                    if (in->ty != T_VOID) ir_ldv_rax(in->a, off);
+                    EMIT(0xE9);
+                    emit_rel32(epilab);
+                    break;
+                }
+                default: break;
+            }
+        }
+    }
+    if (!is_entry) {
+        put_label(epilab);
+        EMIT(0xC9, 0xC3);
+    }
+    free(off);
+}
+
+static void emit_entry_ir(void) {
+    if (!freestanding) {
+        for (int i = 0; i < 8; i++) {
+            char nm[8];
+            sprintf(nm, "argv%d", i + 1);
+            Glob *a = glob_find(nm);
+            if (!a) continue;
+            EMIT(0x48, 0x8B, 0x44, 0x24, (uint8_t)(0x10 + 8 * i));
+            EMIT(0x48, 0x89, 0x05);
+            emit_patch(2, a->off);
+        }
+    }
+    F *fe = ir_funcs;
+    while (fe && strcmp(fe->nm, "entry")) fe = fe->next;
+    if (fe) {
+        ir_exit_lab = new_label();
+        ir_emit_fn(fe, 1);
+        put_label(ir_exit_lab);
+        ir_exit_lab = -1;
+    }
+    int mi = fn_find(entry_name ? entry_name : "main");
+    if (mi >= 0) {
+        EMIT(0xE8);
+        emit_patch(0, FNS[mi].lab);
+        if (freestanding) EMIT(0xEB, 0xFE);
+        else if (is_pe) { EMIT(0x48, 0x89, 0xC1); emit_call_iat(2); }
+        else { EMIT(0x48, 0x89, 0xC7); mov_rax_imm(60); EMIT(0x0F, 0x05); }
+    } else if (freestanding) {
+        EMIT(0xEB, 0xFE);
+    } else if (is_pe) {
+        EMIT(0x31, 0xC9);
+        emit_call_iat(2);
+    } else {
+        mov_rax_imm(60);
+        EMIT(0x31, 0xFF);
+        EMIT(0x0F, 0x05);
+    }
+}
+
+static void generate_code_ir(ASTNode *root) {
+    bin_fmt = (fmt == FMT_BIN);
+    if (bin_fmt) die("IR backend requires ELF or PE output", 0);
+    clen = 0;
+    nglob = 0; gsize = 0;
+    for (int i = 0; i < root->data.block.count; i++) {
+        ASTNode *n = root->data.block.stmts[i];
+        if (n->type != NODE_LET) continue;
+        if (nglob >= (int)(sizeof GLOB / sizeof *GLOB)) die("too many globals", n->line);
+        GLOB[nglob] = (typeof(GLOB[0])){ n->data.let.name, n->data.let.ty, gsize, 0 };
+        gsize += ty_size(n->data.let.ty);
+        nglob++;
+    }
+    for (int i = 0; i < root->data.block.count; i++) {
+        ASTNode *fd = root->data.block.stmts[i];
+        if (fd->type != NODE_FUNCTION) continue;
+        int fi = fn_find(fd->data.function.name);
+        if (fi < 0) die("undefined function", fd->line);
+        FNS[fi].lab = new_label();
+    }
+    glob_hash_build();
+    fn_hash_build();
+    if (!freestanding) {
+        printlab = new_label(); put_label(printlab);
+        if (is_pe) emit_print_pe(); else emit_print_elf();
+        printstrlab = new_label(); put_label(printstrlab);
+        if (is_pe) emit_print_str_pe(); else emit_print_str_elf();
+    }
+    litlab = new_label();
+    for (int i = 0; i < root->data.block.count; i++) {
+        ASTNode *fd = root->data.block.stmts[i];
+        if (fd->type != NODE_FUNCTION) continue;
+        F *ff = ir_funcs;
+        while (ff && strcmp(ff->nm, fd->data.function.name)) ff = ff->next;
+        if (!ff) die("missing IR function", fd->line);
+        put_label(FNS[fn_find(fd->data.function.name)].lab);
+        ir_emit_fn(ff, 0);
+    }
+    entry = clen;
+    emit_entry_ir();
+    put_label(litlab);
+    if (nlit) { memcpy(code + clen, LIT, nlit); clen += nlit; }
+    shrink_relayout();
+    pcb = (PE_SECT + 15) & ~15;
+    apply_patches();
+}
+
+static void reset_codegen_state(void) {
+    clen = 0; entry = 0; nlab = 1; npatch = 0; niat = 0;
+    nglob = 0; gsize = 0; nfn = 0;
+    memset(lab_pos, 0, sizeof lab_pos);
+    memset(GLOB, 0, sizeof GLOB);
+    memset(FNS, 0, sizeof FNS);
+    memset(PATCH, 0, sizeof PATCH);
+    for (int i = 0; i < HSZ; i++) { GH[i] = -1; FH[i] = -1; }
+    litlab = 0; printlab = 0; printstrlab = 0; pcb = 0;
+}
+
 int main(int argc, char **argv) {
-    int cli_fmt = -1, cli_free = -1, ai = 1;
+    int cli_fmt = -1, cli_free = -1, cli_emit_ir = 0, cli_backend = 0, ai = 1;
     long long cli_base = -1;
     char *cli_entry = NULL;
     for (; ai < argc; ai++) {
@@ -3800,6 +5304,11 @@ int main(int argc, char **argv) {
         } else if (!strcmp(a, "-b") && ai + 1 < argc) cli_base = strtoll(argv[++ai], 0, 0);
         else if (!strcmp(a, "-e") && ai + 1 < argc) cli_entry = argv[++ai];
         else if (!strcmp(a, "-r")) cli_free = 1;
+        else if (!strcmp(a, "--emit-ir")) cli_emit_ir = 1;
+        else if (!strcmp(a, "--emit-ssa")) cli_emit_ir = 2;
+        else if (!strcmp(a, "--backend=legacy")) cli_backend = 0;
+        else if (!strcmp(a, "--backend=ssa")) cli_backend = 1;
+        else if (!strcmp(a, "--backend=both")) cli_backend = 2;
         else { fprintf(stderr, "unknown option: %s\n", a); return 1; }
     }
     if (ai >= argc) {
@@ -3826,6 +5335,14 @@ int main(int argc, char **argv) {
     adv(&p);
     ASTNode *root = parse_program(&p);
 
+    if (cli_emit_ir == 1) { ir_lower_program(root); ir_print(); return 0; }
+    if (cli_emit_ir == 2) {
+        ir_lower_program(root);
+        for (F *f = ir_funcs; f; f = f->next) { ir_split_edges(f); ir_prune(f); ir_mem2reg(f); }
+        ir_print();
+        return 0;
+    }
+
     if (cli_fmt >= 0) fmt = cli_fmt;
     if (cli_base >= 0) load_base = cli_base;
     if (cli_entry) entry_name = cli_entry;
@@ -3836,10 +5353,32 @@ int main(int argc, char **argv) {
     is_pe = fmt == FMT_PE;
 
     if (!raw_mode && !boot_mode && !freestanding && !getenv("LGC_NO_OPT")) optimize_program(root);
-    generate_code(root);
-    if (fmt == FMT_BIN) write_bin(out);
-    else if (is_pe) write_pe(out);
-    else write_elf(out);
+
+    if (cli_backend == 2) {
+        generate_code(root);
+        if (fmt == FMT_BIN) write_bin(out);
+        else if (is_pe) write_pe(out);
+        else write_elf(out);
+        reset_codegen_state();
+    }
+    if (cli_backend >= 1) {
+        char out2[512];
+        if (fmt == FMT_BIN) die("IR backend requires ELF or PE output", 0);
+        ir_pipeline(root);
+        generate_code_ir(root);
+        if (cli_backend == 2) {
+            snprintf(out2, sizeof out2, "%s.ssa", out);
+            if (is_pe) write_pe(out2); else write_elf(out2);
+            printf("Generated %s (SSA IR backend)\n", out2);
+        } else {
+            if (is_pe) write_pe(out); else write_elf(out);
+        }
+    } else if (cli_backend == 0) {
+        generate_code(root);
+        if (fmt == FMT_BIN) write_bin(out);
+        else if (is_pe) write_pe(out);
+        else write_elf(out);
+    }
 
     printf("Generated %s (%s x86-64)\n", out,
            fmt == FMT_BIN ? "flat binary" : is_pe ? "PE32+" : "ELF");
