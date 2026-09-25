@@ -2567,6 +2567,7 @@ static struct { signed char kind; unsigned char flags; long value; ASTNode *src;
 
 static char *GNAME[256]; static int gn;
 static long GVAL[256];
+static Type *GTY[256];
 static unsigned char GCONST[256], GASS[256], GADDR[256];
 static int gidx(const char *name) {
     for (int i = 0; i < gn; i++) if (!strcmp(GNAME[i], name)) return i;
@@ -2668,6 +2669,7 @@ static void analyze_program(ASTNode *root) {
         ASTNode *n = root->data.block.stmts[i];
         if (n->type != NODE_LET) continue;
         GNAME[gn] = n->data.let.name;
+        GTY[gn] = n->data.let.ty;
         if (n->data.let.value && n->data.let.value->type == NODE_NUMBER) {
             GVAL[gn] = n->data.let.value->data.number.value; GCONST[gn] = 1;
         } else GCONST[gn] = 0;
@@ -2688,7 +2690,8 @@ static ASTNode *prop_expr(ASTNode *n) {
     switch (n->type) {
         case NODE_VARIABLE: {
             ASTNode *L = osc_find(n->data.variable.name);
-            if (L && !(OI[OIDX(L)].flags & 3) && OI[OIDX(L)].kind) {
+            if (L && L->data.let.ty && L->data.let.ty->kind == 0 &&
+                !(OI[OIDX(L)].flags & 3) && OI[OIDX(L)].kind) {
                 ASTNode *cur = L;
                 while (cur && OI[OIDX(cur)].kind == 2 && !(OI[OIDX(cur)].flags & 3) && OI[OIDX(cur)].src)
                     cur = OI[OIDX(cur)].src;
@@ -2699,7 +2702,7 @@ static ASTNode *prop_expr(ASTNode *n) {
                 }
             } else if (!L) {
                 int g = gidx(n->data.variable.name);
-                if (g >= 0 && GCONST[g] && !GASS[g] && !GADDR[g] && !freestanding) {
+                if (g >= 0 && GCONST[g] && GTY[g] && GTY[g]->kind == 0 && !GASS[g] && !GADDR[g] && !freestanding) {
                     n->type = NODE_NUMBER;
                     n->data.number.value = GVAL[g];
                     return n;
