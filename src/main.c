@@ -204,7 +204,7 @@ static Token next_token(Lexer *lx) {
     }
     lx->pos++;
     unsigned char uc = (unsigned char)c;
-    if (uc >= 128 || !(PUNCT_BIT[uc >> 6] >> (uc & 63) & 1)) 
+    if (uc >= 128 || !(PUNCT_BIT[uc >> 6] >> (uc & 63) & 1))
         return tok(TOK_ERROR, &lx->src[s], 1, line);
     TokenType t = CHAR_TOK[uc];
     int len = 1;
@@ -871,7 +871,7 @@ static ASTNode *parse_program(Parser *p) {
 static uint8_t code[262144];
 static int clen, entry, is_pe;
 static int lab_pos[8192], nlab = 1;
-static struct { int pos, lab, g; } PATCH[8192];   
+static struct { int pos, lab, g; } PATCH[8192];
 static uint8_t p_sz[8192];
 static int p_base[8192];
 static int npatch, litlab, pcb;
@@ -964,7 +964,7 @@ static void mov_rax_imm(long long v) {
     if (!v) { EMIT(0x48, 0x31, 0xC0); return; }
     if (v >= -128 && v <= 127) EMIT(0x6A, (uint8_t)v, 0x58);
     else if (v >= 0 && v <= 0xFFFFFFFFLL) { EMIT(0xB8); emit_imm(v, 4); }
-    else if (v >= -2147483648LL && v <= -1) { EMIT(0x48, 0xC7, 0xC0); emit_imm(v, 4); }  /* mov rax,imm32 */
+    else if (v >= -2147483648LL && v <= -1) { EMIT(0x48, 0xC7, 0xC0); emit_imm(v, 4); }
     else { EMIT(0x48, 0xB8); emit_imm(v, 8); }
 }
 
@@ -984,10 +984,10 @@ static void emit_patch(int g, int lab) {
 }
 static void emit_rel32(int lab) { emit_patch(0, lab); }
 static void emit_jmp(int lab)  { EMIT(0xE9); emit_rel32(lab); }
-static void emit_jcc(int cc, int lab) { EMIT(0x0F, cc); emit_rel32(lab); } 
+static void emit_jcc(int cc, int lab) { EMIT(0x0F, cc); emit_rel32(lab); }
 static void emit_call(int lab) { EMIT(0xE8); emit_rel32(lab); }
 
-#define PE_SECT (0x40 + 4 + 20 + 240 + 40)   
+#define PE_SECT (0x40 + 4 + 20 + 240 + 40)
 
 static int IAT_PATCH[16], niat;
 static void emit_call_iat(int slot) {
@@ -1011,10 +1011,10 @@ static void glob_hash_build(void) {
     for (int i = nglob - 1; i >= 0; i--) { int h = sfnv(GLOB[i].name) & (HSZ - 1); GN[i] = GH[h]; GH[h] = i; }
 }
 
-static void greg_load_rax(int r) { EMIT((uint8_t)(0x48 | (r >= 8)), 0x8B, (uint8_t)(0xC0 | (r & 7))); }          /* mov rax,rN */
-static void greg_store_rax(int r) { EMIT((uint8_t)(0x48 | (r >= 8)), 0x89, (uint8_t)(0xC0 | (r & 7))); }         /* mov rN,rax */
-static void greg_load_rcx(int r) { EMIT((uint8_t)(0x48 | ((r >= 8) << 2)), 0x89, (uint8_t)(0xC0 | ((r & 7) << 3) | 1)); } /* mov rcx,rN */
-static void greg_zero(int r) { EMIT((uint8_t)(0x40 | ((r >= 8) << 2) | (r >= 8)), 0x31, (uint8_t)(0xC0 | ((r & 7) << 3) | (r & 7))); } /* xor rNd,rNd */
+static void greg_load_rax(int r) { EMIT((uint8_t)(0x48 | (r >= 8)), 0x8B, (uint8_t)(0xC0 | (r & 7))); }
+static void greg_store_rax(int r) { EMIT((uint8_t)(0x48 | (r >= 8)), 0x89, (uint8_t)(0xC0 | (r & 7))); }
+static void greg_load_rcx(int r) { EMIT((uint8_t)(0x48 | ((r >= 8) << 2)), 0x89, (uint8_t)(0xC0 | ((r & 7) << 3) | 1)); }
+static void greg_zero(int r) { EMIT((uint8_t)(0x40 | ((r >= 8) << 2) | (r >= 8)), 0x31, (uint8_t)(0xC0 | ((r & 7) << 3) | (r & 7))); }
 
 static void apply_patches(void) {
     for (int i = 0; i < npatch; i++) {
@@ -1244,47 +1244,47 @@ static void emit_print_elf(void) {
 }
 
 static void emit_print_bare(void) {
-    EMIT(0x55);                              /* push rbp */
-    EMIT(0x48,0x89,0xE5);                    /* mov rbp, rsp */
-    EMIT(0x48,0x83,0xEC,0x20);               /* sub rsp, 0x20 */
-    EMIT(0x45,0x31,0xDB);                    /* xor r11d, r11d: negative flag */
-    EMIT(0x48,0x85,0xC0);                    /* test rax, rax */
+    EMIT(0x55);
+    EMIT(0x48,0x89,0xE5);
+    EMIT(0x48,0x83,0xEC,0x20);
+    EMIT(0x45,0x31,0xDB);
+    EMIT(0x48,0x85,0xC0);
     int pos = new_label();
-    emit_jcc(0x89, pos);                     /* js: negative */
-    EMIT(0x48,0xF7,0xD8);                    /* neg rax */
-    EMIT(0x41,0xBB,1,0,0,0);                 /* mov r11d, 1 */
+    emit_jcc(0x89, pos);
+    EMIT(0x48,0xF7,0xD8);
+    EMIT(0x41,0xBB,1,0,0,0);
     put_label(pos);
-    EMIT(0x6A,0x0A,0x59);                    /* push 10; pop rcx */
-    EMIT(0x48,0x8D,0x75,0xFF);               /* lea rsi, [rbp-1]: buffer end */
+    EMIT(0x6A,0x0A,0x59);
+    EMIT(0x48,0x8D,0x75,0xFF);
     int loop = new_label();
     put_label(loop);
-    EMIT(0x48,0x31,0xD2);                    /* xor rdx, rdx */
-    EMIT(0x48,0xF7,0xF1);                    /* div rcx */
-    EMIT(0x80,0xC2,0x30);                    /* add dl, '0' */
-    EMIT(0x48,0xFF,0xCE);                    /* dec rsi */
-    EMIT(0x88,0x16);                         /* mov [rsi], dl */
-    EMIT(0x48,0x85,0xC0);                    /* test rax, rax */
-    emit_jcc(0x85, loop);                    /* jnz loop */
-    EMIT(0x45,0x85,0xDB);                    /* test r11d, r11d */
+    EMIT(0x48,0x31,0xD2);
+    EMIT(0x48,0xF7,0xF1);
+    EMIT(0x80,0xC2,0x30);
+    EMIT(0x48,0xFF,0xCE);
+    EMIT(0x88,0x16);
+    EMIT(0x48,0x85,0xC0);
+    emit_jcc(0x85, loop);
+    EMIT(0x45,0x85,0xDB);
     int wr = new_label();
-    emit_jcc(0x84, wr);                      /* jz: no sign */
-    EMIT(0x48,0xFF,0xCE);                    /* dec rsi */
-    EMIT(0xC6,0x06,0x2D);                    /* mov byte [rsi], '-' */
+    emit_jcc(0x84, wr);
+    EMIT(0x48,0xFF,0xCE);
+    EMIT(0xC6,0x06,0x2D);
     put_label(wr);
-    EMIT(0x66,0xBA,0xF8,0x03);               /* mov dx, 0x3F8 (COM1) */
+    EMIT(0x66,0xBA,0xF8,0x03);
     int oloop = new_label();
     put_label(oloop);
-    EMIT(0x48,0x39,0xEE);                    /* cmp rsi, rbp */
+    EMIT(0x48,0x39,0xEE);
     int onl = new_label();
-    emit_jcc(0x83, onl);                     /* jae: done */
-    EMIT(0x8A,0x06);                         /* mov al, [rsi] */
-    EMIT(0xEE);                              /* out dx, al */
-    EMIT(0x48,0xFF,0xC6);                    /* inc rsi */
+    emit_jcc(0x83, onl);
+    EMIT(0x8A,0x06);
+    EMIT(0xEE);
+    EMIT(0x48,0xFF,0xC6);
     emit_jmp(oloop);
     put_label(onl);
-    EMIT(0xB0,0x0A);                         /* mov al, 10 */
-    EMIT(0xEE);                              /* out dx, al */
-    EMIT(0xC9,0xC3);                         /* leave; ret */
+    EMIT(0xB0,0x0A);
+    EMIT(0xEE);
+    EMIT(0xC9,0xC3);
 }
 
 static void emit_print_str_elf(void) {
@@ -1467,7 +1467,7 @@ static void gen_expr(ASTNode *n) {
             }
             Glob *g = glob_find(n->data.variable.name);
             if (!g) die("undefined variable", n->line);
-            if (g->reg) { greg_load_rax(g->reg); break; }  
+            if (g->reg) { greg_load_rax(g->reg); break; }
             if (g->ty->kind == 2) { EMIT(0x48, 0x8D, 0x05); emit_patch(2, g->off); }
             else if (is_char(g->ty)) { EMIT(0x0F, 0xB6, 0x05); emit_patch(2, g->off); }
             else { EMIT(0x48, 0x8B, 0x05); emit_patch(2, g->off); }
@@ -1513,22 +1513,22 @@ static void gen_expr(ASTNode *n) {
                 if (cop < 0) { greg_store_rax(r); break; }
                 int sync = 1;
                 switch (cop) {
-                    case OP_ADD: EMIT((uint8_t)(0x48 | (r >= 8)), 0x01, (uint8_t)(0xC0 | (r & 7))); break;   /* add  rN,rax */
-                    case OP_SUB: EMIT((uint8_t)(0x48 | (r >= 8)), 0x29, (uint8_t)(0xC0 | (r & 7))); break;   /* sub  rN,rax */
-                    case OP_MUL: EMIT(0x4C, 0x0F, 0xAF, (uint8_t)(0xC0 | ((r & 7) << 3))); break;           /* imul rN,rax */
-                    default: { 
+                    case OP_ADD: EMIT((uint8_t)(0x48 | (r >= 8)), 0x01, (uint8_t)(0xC0 | (r & 7))); break;
+                    case OP_SUB: EMIT((uint8_t)(0x48 | (r >= 8)), 0x29, (uint8_t)(0xC0 | (r & 7))); break;
+                    case OP_MUL: EMIT(0x4C, 0x0F, 0xAF, (uint8_t)(0xC0 | ((r & 7) << 3))); break;
+                    default: {
                         greg_load_rcx(r);
                         greg_store_rax(r);
-                        EMIT(0x48, 0x89, 0xC8);                          /* mov rax,rcx */
-                        EMIT(0x48, 0x99);                                /* cqo */
-                        EMIT((uint8_t)(0x48 | (r >= 8)), 0xF7, (uint8_t)(0xC0 | 0x38 | (r & 7)));  /* idiv rN */
-                        if (cop == OP_MOD) EMIT(0x48, 0x89, 0xD0);       /* mov rax,rdx */
+                        EMIT(0x48, 0x89, 0xC8);
+                        EMIT(0x48, 0x99);
+                        EMIT((uint8_t)(0x48 | (r >= 8)), 0xF7, (uint8_t)(0xC0 | 0x38 | (r & 7)));
+                        if (cop == OP_MOD) EMIT(0x48, 0x89, 0xD0);
                         greg_store_rax(r);
                         sync = 0;
                         break;
                     }
                 }
-                if (sync) greg_load_rax(r);      
+                if (sync) greg_load_rax(r);
                 break;
             }
             if (ty && ty->kind == 0 && (cop < 0 || (!is_char(ty) && (cop == OP_ADD || cop == OP_SUB)))) {
@@ -1567,21 +1567,21 @@ static void gen_expr(ASTNode *n) {
             break;
         case NODE_NOT:
             gen_expr(n->data.unary.value);
-            EMIT(0x48, 0x85, 0xC0);             /* test rax,rax */
-            EMIT(0x0F, 0x94, 0xC0);             /* sete al */
-            EMIT(0x0F, 0xB6, 0xC0);             /* movzx rax,al */
+            EMIT(0x48, 0x85, 0xC0);
+            EMIT(0x0F, 0x94, 0xC0);
+            EMIT(0x0F, 0xB6, 0xC0);
             break;
         case NODE_BNOT:
             gen_expr(n->data.unary.value);
-            EMIT(0x48, 0xF7, 0xD0);             /* not rax */
+            EMIT(0x48, 0xF7, 0xD0);
             break;
         case NODE_BINARY: {
             BinOp op = n->data.binary.op;
             ASTNode *r = n->data.binary.right;
             if (op == OP_AND || op == OP_OR) {
                 int lab_sc = new_label(), lab_end = new_label();
-                int cc = op == OP_AND ? 0x84 : 0x85;   
-                int v_norm = op == OP_AND ? 1 : 0;    
+                int cc = op == OP_AND ? 0x84 : 0x85;
+                int v_norm = op == OP_AND ? 1 : 0;
                 gen_expr(n->data.binary.left);
                 EMIT(0x48, 0x85, 0xC0);
                 emit_jcc(cc, lab_sc);
@@ -1684,9 +1684,9 @@ static void gen_expr(ASTNode *n) {
                 if (ac != 1) die("intrinsic needs 1 argument", n->line);
                 if (!strcmp(nm, "setcr3") && !bin_fmt) die("intrinsic is only available in bin output", n->line);
                 gen_expr(n->data.call.args[0]);
-                if (!strcmp(nm, "lgdt")) EMIT(0x0F, 0x01, 0x10);        /* lgdt [rax] */
-                else if (!strcmp(nm, "lidt")) EMIT(0x0F, 0x01, 0x18);   /* lidt [rax] */
-                else EMIT(0x0F, 0x22, 0xD8);                            /* mov cr3,rax */
+                if (!strcmp(nm, "lgdt")) EMIT(0x0F, 0x01, 0x10);
+                else if (!strcmp(nm, "lidt")) EMIT(0x0F, 0x01, 0x18);
+                else EMIT(0x0F, 0x22, 0xD8);
                 break;
             }
             if (!strcmp(nm, "addr") && fn_find(nm) < 0) {
@@ -1695,42 +1695,42 @@ static void gen_expr(ASTNode *n) {
                 int f = fn_find(n->data.call.args[0]->data.variable.name);
                 if (f < 0) die("addr: unknown function", n->line);
                 EMIT(0x48, 0x8D, 0x05);
-                emit_patch(0, FNS[f].lab);                              /* lea rax,[rip+f] */
+                emit_patch(0, FNS[f].lab);
                 break;
             }
             if (!strcmp(nm, "ld32") && fn_find(nm) < 0) {
                 if (ac != 1) die("ld32(addr)", n->line);
                 gen_expr(n->data.call.args[0]);
-                EMIT(0x8B, 0x00);                                       /* mov eax,[rax] (zero-extends) */
+                EMIT(0x8B, 0x00);
                 break;
             }
             if (!strcmp(nm, "st32") && fn_find(nm) < 0) {
                 if (ac != 2) die("st32(addr, val)", n->line);
                 gen_expr(n->data.call.args[1]);
-                EMIT(0x50);                                             /* push rax (val) */
-                gen_expr(n->data.call.args[0]);                         /* rax = addr */
-                EMIT(0x59);                                             /* pop rcx (val) */
-                EMIT(0x89, 0x08);                                       /* mov [rax],ecx */
+                EMIT(0x50);
+                gen_expr(n->data.call.args[0]);
+                EMIT(0x59);
+                EMIT(0x89, 0x08);
                 break;
             }
             if (!strcmp(nm, "inb") || !strcmp(nm, "inl")) {
                 if (ac != 1) die("inb(port)", n->line);
                 ASTNode *a = n->data.call.args[0];
                 if (a->type == NODE_NUMBER) { EMIT(0x66, 0xBA); emit_imm(a->data.number.value, 2); }
-                else { gen_expr(a); EMIT(0x66, 0x89, 0xC2); }           /* mov dx,ax */
-                if (nm[2] == 'l') EMIT(0xED);                           /* in eax,dx */
-                else { EMIT(0xEC); EMIT(0x0F, 0xB6, 0xC0); }            /* in al,dx; movzx */
+                else { gen_expr(a); EMIT(0x66, 0x89, 0xC2); }
+                if (nm[2] == 'l') EMIT(0xED);
+                else { EMIT(0xEC); EMIT(0x0F, 0xB6, 0xC0); }
                 break;
             }
             if (!strcmp(nm, "outb") || !strcmp(nm, "outl")) {
                 if (ac != 2) die("outb(port, value)", n->line);
                 ASTNode *pa = n->data.call.args[0];
                 gen_expr(n->data.call.args[1]);
-                EMIT(0x50);                                             /* push rax */
+                EMIT(0x50);
                 if (pa->type == NODE_NUMBER) { EMIT(0x66, 0xBA); emit_imm(pa->data.number.value, 2); }
-                else { gen_expr(pa); EMIT(0x66, 0x89, 0xC2); }          /* mov dx,ax */
-                EMIT(0x58);                                             /* pop rax */
-                EMIT(nm[3] == 'l' ? 0xEF : 0xEE);                       /* out dx,eax / out dx,al */
+                else { gen_expr(pa); EMIT(0x66, 0x89, 0xC2); }
+                EMIT(0x58);
+                EMIT(nm[3] == 'l' ? 0xEF : 0xEE);
                 break;
             }
             {
@@ -2005,7 +2005,7 @@ static void gen_stmt(ASTNode *n) {
             else EMIT(0xC9, 0xC3);
             break;
         default:
-            gen_expr(n); 
+            gen_expr(n);
             break;
     }
 }
@@ -2061,7 +2061,7 @@ static void scan_node(ASTNode *n, int w) {
             } else scan_node(v, w);
             break;
         }
-        case NODE_NUMBER: case NODE_STR: case NODE_SIZEOF: break;   
+        case NODE_NUMBER: case NODE_STR: case NODE_SIZEOF: break;
         case NODE_NOT: case NODE_DEREF: case NODE_BNOT:
             scan_node(n->data.unary.value, w);
             break;
@@ -2070,7 +2070,7 @@ static void scan_node(ASTNode *n, int w) {
             scan_node(n->data.binary.right, w);
             break;
         case NODE_ASSIGN:
-            scan_node(n->data.assign.lhs, w);     
+            scan_node(n->data.assign.lhs, w);
             scan_node(n->data.assign.rhs, w);
             break;
         case NODE_LET:    scan_node(n->data.let.value, w); break;
@@ -2123,7 +2123,7 @@ static void pick_glob_regs(ASTNode *root) {
         int best = -1;
         for (int i = 0; i < nglob; i++) {
             if (GLOB[i].reg || gbad[i] || !grefs[i]) continue;
-            if (GLOB[i].ty->kind == 2 || GLOB[i].ty->sz != 8) continue;  
+            if (GLOB[i].ty->kind == 2 || GLOB[i].ty->sz != 8) continue;
             if (best < 0 || grefs[i] > grefs[best]) best = i;
         }
         if (best < 0) return;
@@ -2166,7 +2166,7 @@ static void emit_entry(ASTNode *root) {
             if (!n->data.let.value) continue;
             Glob *g = glob_find(n->data.let.name);
             gen_expr(n->data.let.value);
-            if (g && g->reg) { greg_store_rax(g->reg); continue; }   
+            if (g && g->reg) { greg_store_rax(g->reg); continue; }
             EMIT(0x50);
             EMIT(0x48, 0x8D, 0x1D);
             emit_patch(2, g->off);
@@ -2179,13 +2179,13 @@ static void emit_entry(ASTNode *root) {
     }
     int mi = fn_find(entry_name ? entry_name : "main");
     if (mi >= 0) {
-        EMIT(0xE8); emit_patch(0, FNS[mi].lab);   /* call entry function */
-        if (freestanding) EMIT(0xEB, 0xFE);       /* jmp $ */
+        EMIT(0xE8); emit_patch(0, FNS[mi].lab);
+        if (freestanding) EMIT(0xEB, 0xFE);
         else if (is_pe) {
-            EMIT(0x48, 0x89, 0xC1);               /* mov rcx, rax (exit code) */
+            EMIT(0x48, 0x89, 0xC1);
             emit_call_iat(2);
         } else {
-            EMIT(0x48, 0x89, 0xC7);               /* mov rdi, rax (exit code) */
+            EMIT(0x48, 0x89, 0xC7);
             mov_rax_imm(60);
             EMIT(0x0F, 0x05);
         }
@@ -2310,6 +2310,870 @@ static void generate_code(ASTNode *root) {
     } else {
         apply_patches();
     }
+}
+
+static ASTNode *mk_num(long v, int line) {
+    ASTNode *n = node(NODE_NUMBER, line);
+    n->data.number.value = v;
+    return n;
+}
+
+static ASTNode *mk_var(const char *name, int line) {
+    ASTNode *n = node(NODE_VARIABLE, line);
+    n->data.variable.name = (char *)name;
+    return n;
+}
+
+static ASTNode *mk_let(const char *name, ASTNode *val, int line) {
+    ASTNode *n = node(NODE_LET, line);
+    n->data.let.name = (char *)name;
+    n->data.let.ty = &TY_INT;
+    n->data.let.value = val;
+    return n;
+}
+
+static int has_side_effect(ASTNode *n) {
+    if (!n) return 0;
+    switch (n->type) {
+        case NODE_ASSIGN:
+        case NODE_CALL:
+            return 1;
+        case NODE_BINARY:
+            return has_side_effect(n->data.binary.left) || has_side_effect(n->data.binary.right);
+        case NODE_NOT: case NODE_BNOT: case NODE_ADDR: case NODE_DEREF:
+            return has_side_effect(n->data.unary.value);
+        case NODE_INDEX:
+            return has_side_effect(n->data.index.base) || has_side_effect(n->data.index.index);
+        case NODE_MEMBER:
+            return has_side_effect(n->data.member.base);
+        default:
+            return 0;
+    }
+}
+
+static int is_spec_pure(ASTNode *n) {
+    if (!n) return 0;
+    switch (n->type) {
+        case NODE_NUMBER:
+        case NODE_VARIABLE:
+            return 1;
+        case NODE_BINARY:
+            if (n->data.binary.op == OP_DIV || n->data.binary.op == OP_MOD) return 0;
+            return is_spec_pure(n->data.binary.left) && is_spec_pure(n->data.binary.right);
+        case NODE_NOT: case NODE_BNOT:
+            return is_spec_pure(n->data.unary.value);
+        default:
+            return 0;
+    }
+}
+
+static int ast_equal(ASTNode *a, ASTNode *b) {
+    if (a == b) return 1;
+    if (!a || !b || a->type != b->type) return 0;
+    switch (a->type) {
+        case NODE_NUMBER: return a->data.number.value == b->data.number.value;
+        case NODE_VARIABLE: return !strcmp(a->data.variable.name, b->data.variable.name);
+        case NODE_BINARY:
+            return a->data.binary.op == b->data.binary.op &&
+                   ast_equal(a->data.binary.left, b->data.binary.left) &&
+                   ast_equal(a->data.binary.right, b->data.binary.right);
+        case NODE_NOT: case NODE_BNOT:
+            return ast_equal(a->data.unary.value, b->data.unary.value);
+        default: return 0;
+    }
+}
+
+static ASTNode *fold_binary(ASTNode *n) {
+    BinOp op = n->data.binary.op;
+    ASTNode *l = n->data.binary.left, *r = n->data.binary.right;
+    int lc = l->type == NODE_NUMBER, rc = r->type == NODE_NUMBER;
+    long lv = lc ? l->data.number.value : 0, rv = rc ? r->data.number.value : 0;
+    if (lc && rc) return mkbin(op, l, r, n->line);
+    switch (op) {
+        case OP_ADD:
+            if (lc && lv == 0) return r;
+            if (rc && rv == 0) return l;
+            break;
+        case OP_SUB:
+            if (rc && rv == 0) return l;
+            break;
+        case OP_MUL:
+            if (lc && lv == 0) return mk_num(0, n->line);
+            if (rc && rv == 0) return mk_num(0, n->line);
+            if (lc && lv == 1) return r;
+            if (rc && rv == 1) return l;
+            if (rc && rv > 0 && (rv & (rv - 1)) == 0)
+                return mkbin(OP_SHL, l, mk_num(__builtin_ctzll((unsigned long long)rv), n->line), n->line);
+            if (lc && lv > 0 && (lv & (lv - 1)) == 0)
+                return mkbin(OP_SHL, r, mk_num(__builtin_ctzll((unsigned long long)lv), n->line), n->line);
+            break;
+        case OP_DIV:
+            if (rc && rv == 1) return l;
+            break;
+        case OP_MOD:
+            if (rc && rv == 1) return mk_num(0, n->line);
+            break;
+        case OP_BOR:
+            if (lc && lv == 0) return r;
+            if (rc && rv == 0) return l;
+            break;
+        case OP_BAND:
+            if (lc && lv == -1) return r;
+            if (rc && rv == -1) return l;
+            break;
+        case OP_BXOR:
+            if (lc && lv == 0) return r;
+            if (rc && rv == 0) return l;
+            break;
+        case OP_SHL:
+        case OP_SHR:
+            if (rc && rv == 0) return l;
+            break;
+        default:
+            break;
+    }
+    if (ast_equal(l, r) && is_spec_pure(l)) {
+        if (op == OP_BAND || op == OP_BOR) return l;
+        if (op == OP_BXOR || op == OP_SUB) return mk_num(0, n->line);
+        if (op == OP_EQ || op == OP_LE || op == OP_GE) return mk_num(1, n->line);
+        if (op == OP_NE || op == OP_LT || op == OP_GT) return mk_num(0, n->line);
+    }
+    return n;
+}
+
+static ASTNode *opt_fold_expr(ASTNode *n) {
+    if (!n) return NULL;
+    switch (n->type) {
+        case NODE_BINARY:
+            n->data.binary.left = opt_fold_expr(n->data.binary.left);
+            n->data.binary.right = opt_fold_expr(n->data.binary.right);
+            return fold_binary(n);
+        case NODE_NOT:
+            n->data.unary.value = opt_fold_expr(n->data.unary.value);
+            if (n->data.unary.value->type == NODE_NUMBER)
+                return mk_num(!n->data.unary.value->data.number.value, n->line);
+            return n;
+        case NODE_BNOT:
+            n->data.unary.value = opt_fold_expr(n->data.unary.value);
+            if (n->data.unary.value->type == NODE_NUMBER)
+                return mk_num(~n->data.unary.value->data.number.value, n->line);
+            return n;
+        case NODE_ADDR: case NODE_DEREF:
+            n->data.unary.value = opt_fold_expr(n->data.unary.value);
+            return n;
+        case NODE_INDEX:
+            n->data.index.base = opt_fold_expr(n->data.index.base);
+            n->data.index.index = opt_fold_expr(n->data.index.index);
+            return n;
+        case NODE_MEMBER:
+            n->data.member.base = opt_fold_expr(n->data.member.base);
+            return n;
+        case NODE_ASSIGN:
+            n->data.assign.lhs = opt_fold_expr(n->data.assign.lhs);
+            n->data.assign.rhs = opt_fold_expr(n->data.assign.rhs);
+            return n;
+        case NODE_CALL:
+            for (int i = 0; i < n->data.call.acount; i++)
+                n->data.call.args[i] = opt_fold_expr(n->data.call.args[i]);
+            return n;
+        default:
+            return n;
+    }
+}
+
+static void opt_fold_block(ASTNode *b);
+static void opt_fold_stmt(ASTNode **slot);
+
+static void opt_fold_stmt(ASTNode **slot) {
+    ASTNode *n = *slot;
+    if (!n) return;
+    switch (n->type) {
+        case NODE_LET:
+            if (n->data.let.value) n->data.let.value = opt_fold_expr(n->data.let.value);
+            break;
+        case NODE_PRINT:
+            for (int i = 0; i < n->data.print.ncount; i++)
+                n->data.print.args[i] = opt_fold_expr(n->data.print.args[i]);
+            break;
+        case NODE_RETURN:
+            n->data.return_node.value = opt_fold_expr(n->data.return_node.value);
+            break;
+        case NODE_IF:
+            n->data.if_node.cond = opt_fold_expr(n->data.if_node.cond);
+            opt_fold_stmt(&n->data.if_node.then);
+            opt_fold_stmt(&n->data.if_node.else_);
+            break;
+        case NODE_WHILE:
+            n->data.while_node.cond = opt_fold_expr(n->data.while_node.cond);
+            opt_fold_stmt(&n->data.while_node.body);
+            break;
+        case NODE_FOR:
+            if (n->data.for_node.init) opt_fold_stmt(&n->data.for_node.init);
+            if (n->data.for_node.cond) n->data.for_node.cond = opt_fold_expr(n->data.for_node.cond);
+            if (n->data.for_node.inc) n->data.for_node.inc = opt_fold_expr(n->data.for_node.inc);
+            opt_fold_stmt(&n->data.for_node.body);
+            break;
+        case NODE_SWITCH:
+            n->data.switch_node.expr = opt_fold_expr(n->data.switch_node.expr);
+            for (int i = 0; i < n->data.switch_node.narms; i++)
+                opt_fold_block(n->data.switch_node.arms[i]->data.case_arm.blk);
+            break;
+        case NODE_BLOCK:
+            opt_fold_block(n);
+            break;
+        case NODE_FUNCTION:
+            opt_fold_block(n->data.function.body);
+            break;
+        case NODE_EXTERN_FUNC: case NODE_EXTERN_GLOB:
+            break;
+        default:
+            *slot = opt_fold_expr(n);
+            break;
+    }
+}
+
+static void opt_fold_block(ASTNode *b) {
+    if (!b) return;
+    for (int i = 0; i < b->data.block.count; i++)
+        opt_fold_stmt(&b->data.block.stmts[i]);
+}
+
+#define OSC_CAP 65536
+static struct { char *name; ASTNode *let; } OSC[OSC_CAP];
+static int osc_n;
+static void osc_push(void) {
+    if (osc_n + 1 >= OSC_CAP) die("scope too deep", 0);
+    OSC[osc_n].name = NULL; OSC[osc_n].let = NULL; osc_n++;
+}
+static void osc_pop(void) {
+    while (osc_n > 0 && OSC[osc_n - 1].let) osc_n--;
+    if (osc_n > 0) osc_n--;
+}
+static void osc_add(char *name, ASTNode *let) {
+    if (osc_n >= OSC_CAP) die("scope too deep", 0);
+    OSC[osc_n].name = name; OSC[osc_n].let = let; osc_n++;
+}
+static ASTNode *osc_find(const char *name) {
+    for (int i = osc_n - 1; i >= 0; i--) {
+        if (!OSC[i].let) continue;
+        if (!strcmp(OSC[i].name, name)) return OSC[i].let;
+    }
+    return NULL;
+}
+
+#define OIDX(n) ((int)((n) - NODE_ARENA))
+static struct { signed char kind; unsigned char flags; long value; ASTNode *src; } OI[NODE_CAP];
+
+static char *GNAME[256]; static int gn;
+static long GVAL[256];
+static unsigned char GCONST[256], GASS[256], GADDR[256];
+static int gidx(const char *name) {
+    for (int i = 0; i < gn; i++) if (!strcmp(GNAME[i], name)) return i;
+    return -1;
+}
+
+static void analyze_expr(ASTNode *n) {
+    if (!n) return;
+    switch (n->type) {
+        case NODE_VARIABLE: break;
+        case NODE_BINARY:
+            analyze_expr(n->data.binary.left);
+            analyze_expr(n->data.binary.right);
+            break;
+        case NODE_ASSIGN:
+            if (n->data.assign.lhs->type == NODE_VARIABLE) {
+                ASTNode *L = osc_find(n->data.assign.lhs->data.variable.name);
+                if (L) OI[OIDX(L)].flags |= 1;
+                else { int g = gidx(n->data.assign.lhs->data.variable.name); if (g >= 0) GASS[g] = 1; }
+            }
+            analyze_expr(n->data.assign.lhs);
+            analyze_expr(n->data.assign.rhs);
+            break;
+        case NODE_ADDR:
+            if (n->data.unary.value->type == NODE_VARIABLE) {
+                ASTNode *L = osc_find(n->data.unary.value->data.variable.name);
+                if (L) OI[OIDX(L)].flags |= 2;
+                else { int g = gidx(n->data.unary.value->data.variable.name); if (g >= 0) GADDR[g] = 1; }
+            } else analyze_expr(n->data.unary.value);
+            break;
+        case NODE_NOT: case NODE_BNOT: case NODE_DEREF:
+            analyze_expr(n->data.unary.value);
+            break;
+        case NODE_INDEX:
+            analyze_expr(n->data.index.base);
+            analyze_expr(n->data.index.index);
+            break;
+        case NODE_MEMBER:
+            analyze_expr(n->data.member.base);
+            break;
+        case NODE_CALL:
+            for (int i = 0; i < n->data.call.acount; i++) analyze_expr(n->data.call.args[i]);
+            break;
+        default: break;
+    }
+}
+
+static void analyze_stmt(ASTNode *n) {
+    if (!n) return;
+    switch (n->type) {
+        case NODE_LET:
+            analyze_expr(n->data.let.value);
+            if (n->data.let.value && n->data.let.value->type == NODE_NUMBER) {
+                OI[OIDX(n)].kind = 1; OI[OIDX(n)].value = n->data.let.value->data.number.value;
+            } else if (n->data.let.value && n->data.let.value->type == NODE_VARIABLE) {
+                ASTNode *SL = osc_find(n->data.let.value->data.variable.name);
+                if (SL) { OI[OIDX(n)].kind = 2; OI[OIDX(n)].src = SL; }
+            }
+            osc_add(n->data.let.name, n);
+            break;
+        case NODE_BLOCK:
+            osc_push();
+            for (int i = 0; i < n->data.block.count; i++) analyze_stmt(n->data.block.stmts[i]);
+            osc_pop();
+            break;
+        case NODE_IF:
+            analyze_expr(n->data.if_node.cond);
+            osc_push(); analyze_stmt(n->data.if_node.then); osc_pop();
+            osc_push(); analyze_stmt(n->data.if_node.else_); osc_pop();
+            break;
+        case NODE_WHILE:
+            analyze_expr(n->data.while_node.cond);
+            osc_push(); analyze_stmt(n->data.while_node.body); osc_pop();
+            break;
+        case NODE_FOR:
+            osc_push();
+            analyze_stmt(n->data.for_node.init);
+            analyze_expr(n->data.for_node.cond);
+            analyze_expr(n->data.for_node.inc);
+            analyze_stmt(n->data.for_node.body);
+            osc_pop();
+            break;
+        case NODE_SWITCH:
+            analyze_expr(n->data.switch_node.expr);
+            for (int i = 0; i < n->data.switch_node.narms; i++) {
+                osc_push(); analyze_stmt(n->data.switch_node.arms[i]->data.case_arm.blk); osc_pop();
+            }
+            break;
+        case NODE_RETURN: analyze_expr(n->data.return_node.value); break;
+        case NODE_PRINT: for (int i = 0; i < n->data.print.ncount; i++) analyze_expr(n->data.print.args[i]); break;
+        case NODE_FUNCTION: osc_n = 0; analyze_stmt(n->data.function.body); break;
+        default: analyze_expr(n); break;
+    }
+}
+
+static void analyze_program(ASTNode *root) {
+    gn = 0;
+    for (int i = 0; i < root->data.block.count; i++) {
+        ASTNode *n = root->data.block.stmts[i];
+        if (n->type != NODE_LET) continue;
+        GNAME[gn] = n->data.let.name;
+        if (n->data.let.value && n->data.let.value->type == NODE_NUMBER) {
+            GVAL[gn] = n->data.let.value->data.number.value; GCONST[gn] = 1;
+        } else GCONST[gn] = 0;
+        GASS[gn] = 0; GADDR[gn] = 0;
+        gn++;
+    }
+    osc_n = 0;
+    for (int i = 0; i < root->data.block.count; i++) {
+        ASTNode *n = root->data.block.stmts[i];
+        if (n->type == NODE_LET) analyze_expr(n->data.let.value);
+        else { osc_n = 0; analyze_stmt(n); }
+    }
+    osc_n = 0;
+}
+
+static ASTNode *prop_expr(ASTNode *n) {
+    if (!n) return NULL;
+    switch (n->type) {
+        case NODE_VARIABLE: {
+            ASTNode *L = osc_find(n->data.variable.name);
+            if (L && !(OI[OIDX(L)].flags & 3) && OI[OIDX(L)].kind) {
+                ASTNode *cur = L;
+                while (cur && OI[OIDX(cur)].kind == 2 && !(OI[OIDX(cur)].flags & 3) && OI[OIDX(cur)].src)
+                    cur = OI[OIDX(cur)].src;
+                if (cur && OI[OIDX(cur)].kind == 1 && !(OI[OIDX(cur)].flags & 3)) {
+                    n->type = NODE_NUMBER;
+                    n->data.number.value = OI[OIDX(cur)].value;
+                    return n;
+                }
+            } else if (!L) {
+                int g = gidx(n->data.variable.name);
+                if (g >= 0 && GCONST[g] && !GASS[g] && !GADDR[g]) {
+                    n->type = NODE_NUMBER;
+                    n->data.number.value = GVAL[g];
+                    return n;
+                }
+            }
+            return n;
+        }
+        case NODE_BINARY:
+            n->data.binary.left = prop_expr(n->data.binary.left);
+            n->data.binary.right = prop_expr(n->data.binary.right);
+            return n;
+        case NODE_NOT: case NODE_BNOT: case NODE_DEREF:
+            n->data.unary.value = prop_expr(n->data.unary.value);
+            return n;
+        case NODE_ADDR: case NODE_SIZEOF:
+            return n;
+        case NODE_INDEX:
+            n->data.index.base = prop_expr(n->data.index.base);
+            n->data.index.index = prop_expr(n->data.index.index);
+            return n;
+        case NODE_MEMBER:
+            n->data.member.base = prop_expr(n->data.member.base);
+            return n;
+        case NODE_ASSIGN:
+            n->data.assign.rhs = prop_expr(n->data.assign.rhs);
+            return n;
+        case NODE_CALL:
+            for (int i = 0; i < n->data.call.acount; i++) n->data.call.args[i] = prop_expr(n->data.call.args[i]);
+            return n;
+        default:
+            return n;
+    }
+}
+
+static void prop_stmt(ASTNode *n) {
+    if (!n) return;
+    switch (n->type) {
+        case NODE_LET:
+            if (n->data.let.value) n->data.let.value = prop_expr(n->data.let.value);
+            osc_add(n->data.let.name, n);
+            break;
+        case NODE_BLOCK:
+            osc_push();
+            for (int i = 0; i < n->data.block.count; i++) prop_stmt(n->data.block.stmts[i]);
+            osc_pop();
+            break;
+        case NODE_IF:
+            n->data.if_node.cond = prop_expr(n->data.if_node.cond);
+            osc_push(); prop_stmt(n->data.if_node.then); osc_pop();
+            osc_push(); prop_stmt(n->data.if_node.else_); osc_pop();
+            break;
+        case NODE_WHILE:
+            n->data.while_node.cond = prop_expr(n->data.while_node.cond);
+            osc_push(); prop_stmt(n->data.while_node.body); osc_pop();
+            break;
+        case NODE_FOR:
+            osc_push();
+            prop_stmt(n->data.for_node.init);
+            if (n->data.for_node.cond) n->data.for_node.cond = prop_expr(n->data.for_node.cond);
+            if (n->data.for_node.inc) n->data.for_node.inc = prop_expr(n->data.for_node.inc);
+            prop_stmt(n->data.for_node.body);
+            osc_pop();
+            break;
+        case NODE_SWITCH:
+            n->data.switch_node.expr = prop_expr(n->data.switch_node.expr);
+            for (int i = 0; i < n->data.switch_node.narms; i++) {
+                osc_push(); prop_stmt(n->data.switch_node.arms[i]->data.case_arm.blk); osc_pop();
+            }
+            break;
+        case NODE_RETURN: n->data.return_node.value = prop_expr(n->data.return_node.value); break;
+        case NODE_PRINT: for (int i = 0; i < n->data.print.ncount; i++) n->data.print.args[i] = prop_expr(n->data.print.args[i]); break;
+        case NODE_FUNCTION: osc_n = 0; prop_stmt(n->data.function.body); break;
+        default: prop_expr(n); break;
+    }
+}
+
+static void prop_program(ASTNode *root) {
+    osc_n = 0;
+    for (int i = 0; i < root->data.block.count; i++) {
+        ASTNode *n = root->data.block.stmts[i];
+        if (n->type == NODE_LET) {
+            if (n->data.let.value) n->data.let.value = prop_expr(n->data.let.value);
+        } else { osc_n = 0; prop_stmt(n); }
+    }
+    osc_n = 0;
+}
+
+static void fb_block(ASTNode *b);
+static void fb_norm(ASTNode **slot);
+static void fb_recurse(ASTNode *s);
+static void fb_emit(ASTNode *s, ASTNode ***out, int *n, int *cap);
+
+static void fb_emit(ASTNode *s, ASTNode ***out, int *n, int *cap) {
+    if (!s) return;
+    if (s->type == NODE_BLOCK) {
+        fb_block(s);
+        for (int i = 0; i < s->data.block.count; i++) PUSH(*out, *n, *cap, s->data.block.stmts[i]);
+    } else {
+        fb_recurse(s);
+        PUSH(*out, *n, *cap, s);
+    }
+}
+
+static void fb_block(ASTNode *b) {
+    if (!b) return;
+    ASTNode **out = NULL; int n = 0, cap = 0;
+    for (int i = 0; i < b->data.block.count; i++) {
+        ASTNode *s = b->data.block.stmts[i];
+        if (s->type == NODE_IF && s->data.if_node.cond->type == NODE_NUMBER) {
+            fb_emit(s->data.if_node.cond->data.number.value ? s->data.if_node.then : s->data.if_node.else_,
+                    &out, &n, &cap);
+        } else if (s->type == NODE_WHILE && s->data.while_node.cond->type == NODE_NUMBER &&
+                   !s->data.while_node.cond->data.number.value) {
+        } else {
+            fb_recurse(s);
+            PUSH(out, n, cap, s);
+        }
+    }
+    b->data.block.stmts = out; b->data.block.count = n; b->data.block.cap = cap;
+}
+
+static void fb_norm(ASTNode **slot) {
+    if (!*slot) return;
+    if ((*slot)->type != NODE_BLOCK) {
+        ASTNode *b = node(NODE_BLOCK, (*slot)->line);
+        PUSH(b->data.block.stmts, b->data.block.count, b->data.block.cap, *slot);
+        *slot = b;
+    }
+    fb_block(*slot);
+}
+
+static void fb_recurse(ASTNode *s) {
+    if (!s) return;
+    switch (s->type) {
+        case NODE_IF: fb_norm(&s->data.if_node.then); fb_norm(&s->data.if_node.else_); break;
+        case NODE_WHILE: fb_norm(&s->data.while_node.body); break;
+        case NODE_FOR: fb_norm(&s->data.for_node.body); break;
+        case NODE_SWITCH: for (int i = 0; i < s->data.switch_node.narms; i++) fb_block(s->data.switch_node.arms[i]->data.case_arm.blk); break;
+        case NODE_BLOCK: fb_block(s); break;
+        case NODE_FUNCTION: fb_block(s->data.function.body); break;
+        default: break;
+    }
+}
+
+#define VNCAP 4096
+static struct { int tag, op, l, r; long value; char *name; int vn; } VK[VNCAP];
+static int vk_n;
+static int vnv[NODE_CAP];
+static int vncnt[VNCAP];
+static char *vntmp[VNCAP];
+static int cse_id;
+static struct { char *tmp; ASTNode *val; } *HOIST;
+static int hn, hcap;
+
+static void hoist_add(char *tmp, ASTNode *val) {
+    if (hn >= hcap) { hcap = hcap ? hcap * 2 : 8; HOIST = realloc(HOIST, hcap * sizeof *HOIST); }
+    HOIST[hn].tmp = tmp; HOIST[hn].val = val; hn++;
+}
+
+static void cse_reset(void) {
+    for (int i = 0; i < vk_n; i++) { vncnt[i] = 0; vntmp[i] = NULL; }
+    vk_n = 0;
+    hn = 0;
+}
+
+static int vn_cons(int tag, int op, int l, int r, long value, const char *name) {
+    for (int i = 0; i < vk_n; i++) {
+        if (VK[i].tag != tag) continue;
+        if (tag == 0) { if (VK[i].value != value) continue; }
+        else if (tag == 1) { if (strcmp(VK[i].name, name)) continue; }
+        else if (tag == 2) { if (VK[i].op != op || VK[i].l != l || VK[i].r != r) continue; }
+        else { if (VK[i].l != l) continue; }
+        return VK[i].vn;
+    }
+    VK[vk_n].tag = tag; VK[vk_n].op = op; VK[vk_n].l = l; VK[vk_n].r = r;
+    VK[vk_n].value = value; VK[vk_n].name = (char *)name; VK[vk_n].vn = vk_n;
+    return vk_n++;
+}
+
+static int vn_expr(ASTNode *n) {
+    switch (n->type) {
+        case NODE_NUMBER: return vn_cons(0, 0, 0, 0, n->data.number.value, NULL);
+        case NODE_VARIABLE: return vn_cons(1, 0, 0, 0, 0, n->data.variable.name);
+        case NODE_BINARY: {
+            int l = vn_expr(n->data.binary.left);
+            int r = vn_expr(n->data.binary.right);
+            return vn_cons(2, n->data.binary.op, l, r, 0, NULL);
+        }
+        case NODE_NOT: return vn_cons(3, 0, vn_expr(n->data.unary.value), 0, 0, NULL);
+        case NODE_BNOT: return vn_cons(4, 0, vn_expr(n->data.unary.value), 0, 0, NULL);
+        default: return -1;
+    }
+}
+
+static void cse_count_expr(ASTNode *n) {
+    if (!n) return;
+    switch (n->type) {
+        case NODE_NUMBER: case NODE_VARIABLE: {
+            int v = vn_expr(n); vnv[OIDX(n)] = v; vncnt[v]++;
+            break;
+        }
+        case NODE_BINARY:
+            cse_count_expr(n->data.binary.left);
+            cse_count_expr(n->data.binary.right);
+            { int v = vn_expr(n); vnv[OIDX(n)] = v; vncnt[v]++; }
+            break;
+        case NODE_NOT: case NODE_BNOT:
+            cse_count_expr(n->data.unary.value);
+            { int v = vn_expr(n); vnv[OIDX(n)] = v; vncnt[v]++; }
+            break;
+        default: break;
+    }
+}
+
+static ASTNode *cse_rewrite_expr(ASTNode *n) {
+    if (!n) return NULL;
+    switch (n->type) {
+        case NODE_NUMBER: case NODE_VARIABLE:
+            return n;
+        case NODE_BINARY:
+            n->data.binary.left = cse_rewrite_expr(n->data.binary.left);
+            n->data.binary.right = cse_rewrite_expr(n->data.binary.right);
+            break;
+        case NODE_NOT: case NODE_BNOT:
+            n->data.unary.value = cse_rewrite_expr(n->data.unary.value);
+            break;
+        default:
+            return n;
+    }
+    int v = vnv[OIDX(n)];
+    if (v >= 0 && vncnt[v] >= 2) {
+        if (!vntmp[v]) {
+            char buf[32];
+            sprintf(buf, "$cse%d", cse_id++);
+            vntmp[v] = str_put(buf, strlen(buf));
+            hoist_add(vntmp[v], n);
+        }
+        return mk_var(vntmp[v], n->line);
+    }
+    return n;
+}
+
+static int cse_eligible(ASTNode *s) {
+    switch (s->type) {
+        case NODE_LET: return !s->data.let.value || is_spec_pure(s->data.let.value);
+        case NODE_ASSIGN: return s->data.assign.lhs->type == NODE_VARIABLE && is_spec_pure(s->data.assign.rhs);
+        case NODE_RETURN: return is_spec_pure(s->data.return_node.value);
+        case NODE_PRINT:
+            for (int i = 0; i < s->data.print.ncount; i++) if (!is_spec_pure(s->data.print.args[i])) return 0;
+            return 1;
+        default: return is_spec_pure(s);
+    }
+}
+
+static void cse_do_stmt(ASTNode *s) {
+    cse_reset();
+    switch (s->type) {
+        case NODE_LET: if (s->data.let.value) cse_count_expr(s->data.let.value); break;
+        case NODE_ASSIGN: cse_count_expr(s->data.assign.rhs); break;
+        case NODE_RETURN: cse_count_expr(s->data.return_node.value); break;
+        case NODE_PRINT: for (int i = 0; i < s->data.print.ncount; i++) cse_count_expr(s->data.print.args[i]); break;
+        default: cse_count_expr(s); break;
+    }
+    switch (s->type) {
+        case NODE_LET: if (s->data.let.value) s->data.let.value = cse_rewrite_expr(s->data.let.value); break;
+        case NODE_ASSIGN: s->data.assign.rhs = cse_rewrite_expr(s->data.assign.rhs); break;
+        case NODE_RETURN: s->data.return_node.value = cse_rewrite_expr(s->data.return_node.value); break;
+        case NODE_PRINT: for (int i = 0; i < s->data.print.ncount; i++) s->data.print.args[i] = cse_rewrite_expr(s->data.print.args[i]); break;
+        default: cse_rewrite_expr(s); break;
+    }
+}
+
+static void cse_block(ASTNode *b);
+static void cse_sub(ASTNode **slot);
+
+static void cse_sub(ASTNode **slot) {
+    if (!*slot) return;
+    if ((*slot)->type != NODE_BLOCK) {
+        ASTNode *b = node(NODE_BLOCK, (*slot)->line);
+        PUSH(b->data.block.stmts, b->data.block.count, b->data.block.cap, *slot);
+        *slot = b;
+    }
+    cse_block(*slot);
+}
+
+static void cse_block(ASTNode *b) {
+    if (!b) return;
+    ASTNode **out = NULL; int n = 0, cap = 0;
+    for (int i = 0; i < b->data.block.count; i++) {
+        ASTNode *s = b->data.block.stmts[i];
+        switch (s->type) {
+            case NODE_BLOCK: cse_block(s); break;
+            case NODE_IF: cse_sub(&s->data.if_node.then); cse_sub(&s->data.if_node.else_); break;
+            case NODE_WHILE: cse_sub(&s->data.while_node.body); break;
+            case NODE_FOR: cse_sub(&s->data.for_node.body); break;
+            case NODE_SWITCH: for (int k = 0; k < s->data.switch_node.narms; k++) cse_block(s->data.switch_node.arms[k]->data.case_arm.blk); break;
+            case NODE_FUNCTION: cse_block(s->data.function.body); break;
+            default: if (cse_eligible(s)) cse_do_stmt(s); break;
+        }
+        for (int k = 0; k < hn; k++) PUSH(out, n, cap, mk_let(HOIST[k].tmp, HOIST[k].val, s->line));
+        hn = 0;
+        PUSH(out, n, cap, s);
+    }
+    b->data.block.stmts = out; b->data.block.count = n; b->data.block.cap = cap;
+}
+
+static unsigned char used[NODE_CAP];
+
+static void dce_count_expr(ASTNode *n) {
+    if (!n) return;
+    switch (n->type) {
+        case NODE_VARIABLE: {
+            ASTNode *L = osc_find(n->data.variable.name);
+            if (L) used[OIDX(L)] = 1;
+            break;
+        }
+        case NODE_BINARY:
+            dce_count_expr(n->data.binary.left);
+            dce_count_expr(n->data.binary.right);
+            break;
+        case NODE_ASSIGN:
+            dce_count_expr(n->data.assign.lhs);
+            dce_count_expr(n->data.assign.rhs);
+            break;
+        case NODE_NOT: case NODE_BNOT: case NODE_ADDR: case NODE_DEREF: case NODE_SIZEOF:
+            dce_count_expr(n->data.unary.value);
+            break;
+        case NODE_INDEX:
+            dce_count_expr(n->data.index.base);
+            dce_count_expr(n->data.index.index);
+            break;
+        case NODE_MEMBER:
+            dce_count_expr(n->data.member.base);
+            break;
+        case NODE_CALL:
+            for (int i = 0; i < n->data.call.acount; i++) dce_count_expr(n->data.call.args[i]);
+            break;
+        default: break;
+    }
+}
+
+static void dce_count_stmt(ASTNode *n) {
+    if (!n) return;
+    switch (n->type) {
+        case NODE_LET:
+            dce_count_expr(n->data.let.value);
+            osc_add(n->data.let.name, n);
+            break;
+        case NODE_BLOCK:
+            osc_push();
+            for (int i = 0; i < n->data.block.count; i++) dce_count_stmt(n->data.block.stmts[i]);
+            osc_pop();
+            break;
+        case NODE_IF:
+            dce_count_expr(n->data.if_node.cond);
+            osc_push(); dce_count_stmt(n->data.if_node.then); osc_pop();
+            osc_push(); dce_count_stmt(n->data.if_node.else_); osc_pop();
+            break;
+        case NODE_WHILE:
+            dce_count_expr(n->data.while_node.cond);
+            osc_push(); dce_count_stmt(n->data.while_node.body); osc_pop();
+            break;
+        case NODE_FOR:
+            osc_push();
+            dce_count_stmt(n->data.for_node.init);
+            dce_count_expr(n->data.for_node.cond);
+            dce_count_expr(n->data.for_node.inc);
+            dce_count_stmt(n->data.for_node.body);
+            osc_pop();
+            break;
+        case NODE_SWITCH:
+            dce_count_expr(n->data.switch_node.expr);
+            for (int i = 0; i < n->data.switch_node.narms; i++) {
+                osc_push(); dce_count_stmt(n->data.switch_node.arms[i]->data.case_arm.blk); osc_pop();
+            }
+            break;
+        case NODE_RETURN: dce_count_expr(n->data.return_node.value); break;
+        case NODE_PRINT: for (int i = 0; i < n->data.print.ncount; i++) dce_count_expr(n->data.print.args[i]); break;
+        case NODE_FUNCTION: osc_n = 0; dce_count_stmt(n->data.function.body); break;
+        default: dce_count_expr(n); break;
+    }
+}
+
+static void dce_count_program(ASTNode *root) {
+    memset(used, 0, sizeof used);
+    osc_n = 0;
+    for (int i = 0; i < root->data.block.count; i++) {
+        ASTNode *n = root->data.block.stmts[i];
+        if (n->type == NODE_LET) continue;
+        osc_n = 0;
+        dce_count_stmt(n);
+    }
+    osc_n = 0;
+}
+
+static void dce_block(ASTNode *b, int top);
+static void dce_sub(ASTNode **slot);
+static void dce_recurse(ASTNode *s);
+
+static void dce_sub(ASTNode **slot) {
+    if (!*slot) return;
+    if ((*slot)->type != NODE_BLOCK) {
+        ASTNode *b = node(NODE_BLOCK, (*slot)->line);
+        PUSH(b->data.block.stmts, b->data.block.count, b->data.block.cap, *slot);
+        *slot = b;
+    }
+    dce_block(*slot, 0);
+}
+
+static void dce_recurse(ASTNode *s) {
+    if (!s) return;
+    switch (s->type) {
+        case NODE_IF: dce_sub(&s->data.if_node.then); dce_sub(&s->data.if_node.else_); break;
+        case NODE_WHILE: dce_sub(&s->data.while_node.body); break;
+        case NODE_FOR: {
+            ASTNode *ini = s->data.for_node.init;
+            if (ini) {
+                if (ini->type == NODE_LET) {
+                    if (!used[OIDX(ini)] && !has_side_effect(ini->data.let.value)) s->data.for_node.init = NULL;
+                } else if (!has_side_effect(ini)) {
+                    s->data.for_node.init = NULL;
+                }
+            }
+            dce_sub(&s->data.for_node.body);
+            break;
+        }
+        case NODE_SWITCH: for (int i = 0; i < s->data.switch_node.narms; i++) dce_block(s->data.switch_node.arms[i]->data.case_arm.blk, 0); break;
+        case NODE_BLOCK: dce_block(s, 0); break;
+        case NODE_FUNCTION: dce_block(s->data.function.body, 0); break;
+        default: break;
+    }
+}
+
+static void dce_block(ASTNode *b, int top) {
+    if (!b) return;
+    ASTNode **out = NULL; int n = 0, cap = 0; int terminated = 0;
+    for (int i = 0; i < b->data.block.count; i++) {
+        ASTNode *s = b->data.block.stmts[i];
+        if (terminated) continue;
+        switch (s->type) {
+            case NODE_LET:
+                if (top) PUSH(out, n, cap, s);
+                else if (s->data.let.value) {
+                    if (has_side_effect(s->data.let.value) || used[OIDX(s)]) PUSH(out, n, cap, s);
+                } else {
+                    if (used[OIDX(s)]) PUSH(out, n, cap, s);
+                }
+                break;
+            case NODE_IF: dce_recurse(s); PUSH(out, n, cap, s); break;
+            case NODE_WHILE: dce_recurse(s); PUSH(out, n, cap, s); break;
+            case NODE_FOR: dce_recurse(s); PUSH(out, n, cap, s); break;
+            case NODE_SWITCH: dce_recurse(s); PUSH(out, n, cap, s); break;
+            case NODE_BLOCK: dce_block(s, 0); PUSH(out, n, cap, s); break;
+            case NODE_FUNCTION: dce_block(s->data.function.body, 0); PUSH(out, n, cap, s); break;
+            case NODE_PRINT: dce_recurse(s); PUSH(out, n, cap, s); break;
+            case NODE_RETURN: dce_recurse(s); PUSH(out, n, cap, s); terminated = 1; break;
+            case NODE_BREAK: case NODE_CONTINUE: PUSH(out, n, cap, s); terminated = 1; break;
+            case NODE_EXTERN_FUNC: case NODE_EXTERN_GLOB: PUSH(out, n, cap, s); break;
+            default:
+                if (has_side_effect(s)) PUSH(out, n, cap, s);
+                break;
+        }
+    }
+    b->data.block.stmts = out; b->data.block.count = n; b->data.block.cap = cap;
+}
+
+static void optimize_program(ASTNode *root) {
+    opt_fold_block(root);
+    analyze_program(root);
+    prop_program(root);
+    opt_fold_block(root);
+    fb_block(root);
+    cse_block(root);
+    dce_count_program(root);
+    dce_block(root, 1);
 }
 
 static void write_elf(const char *filename) {
@@ -2614,6 +3478,7 @@ int main(int argc, char **argv) {
     if (fmt == FMT_BIN) freestanding = 1;
     is_pe = fmt == FMT_PE;
 
+    if (!raw_mode && !boot_mode && !freestanding && !getenv("LGC_NO_OPT")) optimize_program(root);
     generate_code(root);
     if (fmt == FMT_BIN) write_bin(out);
     else if (is_pe) write_pe(out);
