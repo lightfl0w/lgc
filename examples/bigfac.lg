@@ -1,0 +1,43 @@
+let int dig[80];
+let int nd = 0;
+
+func dmul(k) {
+    let int i = 0;
+    let int c = 0;
+    while (i < nd) {
+        let int t = dig[i] * k + c;
+        dig[i] = t % 10;
+        c = t / 10;
+        i += 1;
+    }
+    while (c > 0) {
+        dig[nd] = c % 10;
+        c = c / 10;
+        nd += 1;
+    }
+    return 0;
+}
+
+func facbig(n) {
+    dig[0] = 1;
+    nd = 1;
+    let int k = 2;
+    while (k <= n) {
+        dmul(k);
+        k += 1;
+    }
+    return 0;
+}
+
+func dprint() {
+    let int i = nd;
+    while (i > 0) {
+        i -= 1;
+        print dig[i];
+    }
+    return 0;
+}
+
+facbig(50);
+dprint();
+print "\n";

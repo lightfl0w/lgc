@@ -5,4 +5,4 @@ func fac(n) {
         return n * fac(n - 1);
     }
 }
-print fac(5);
+print fac(35);
