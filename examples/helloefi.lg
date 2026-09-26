@@ -1,0 +1,15 @@
+@efi;
+const P_DBG = 0xE9;
+
+func main() {
+    set8(AL, 85); out_al(P_DBG);
+    set8(AL, 69); out_al(P_DBG);
+    set8(AL, 70); out_al(P_DBG);
+    set8(AL, 73); out_al(P_DBG);
+    set8(AL, 32); out_al(P_DBG);
+    set8(AL, 79); out_al(P_DBG);
+    set8(AL, 75); out_al(P_DBG);
+    set8(AL, 13); out_al(P_DBG);
+    set8(AL, 10); out_al(P_DBG);
+    return 0;
+}

@@ -836,6 +836,7 @@ static char *out_entry_name;
 static int out_freestanding;
 static int out_raw_mode;
 static int out_boot_mode;
+static int out_efi_mode;
 static int out_bin_fmt;
 static int out_print_label;
 static int out_print_str_label;
@@ -861,6 +862,7 @@ static void parse_directive(struct PARSE_STATE *p) {
     else if (!strcmp(d, "nort")) out_freestanding = 1;
     else if (!strcmp(d, "raw")) out_raw_mode = 1;
     else if (!strcmp(d, "boot")) out_boot_mode = 1;
+    else if (!strcmp(d, "efi"))  out_efi_mode = 1;
     else die("unknown directive", line);
     parse_expect(p, TOK_SEMICOLON, "expected ';' after directive");
 }
@@ -879,7 +881,7 @@ static struct AST_NODE *parse_program(struct PARSE_STATE *p) {
 }
 
 static uint8_t emit_buf[262144];
-static int emit_len, emit_entry_off, emit_is_pe;
+static int emit_len, emit_entry_off, emit_is_pe, emit_pe_impsz;
 static int emit_label_pos[8192], emit_nlabel = 1;
 static struct { int pos, lab, g; } EMIT_PATCHES[8192];
 static uint8_t emit_patch_size[8192];
@@ -1037,7 +1039,7 @@ static void emit_apply_patches(void) {
         if (EMIT_PATCHES[i].g == 3) rel = t - emit_label_pos[emit_patch_base[i]];
         else if (EMIT_PATCHES[i].g < 2) rel = t - (p + sz);
         else if (emit_is_pe)
-            rel = (int64_t)emit_pcb + ((emit_len + 15) & ~15) + 176 + EMIT_PATCHES[i].lab - (emit_pcb + p + 4);
+            rel = (int64_t)emit_pcb + ((emit_len + 15) & ~15) + emit_pe_impsz + EMIT_PATCHES[i].lab - (emit_pcb + p + 4);
         else {
             int64_t hdr = 64 + 56;
             int64_t dva = 0x400000 + hdr + emit_len;
@@ -1750,7 +1752,7 @@ static void x64_gen_expr(struct AST_NODE *n) {
                     if (!strcmp(nm, RAW_NAMES[k])) { ri = k; break; }
                 if (ri < 0) goto not_intrinsic;
                 if (ac != RAW_NARGS[ri]) die("intrinsic: wrong argument count", n->line);
-                if (((0x71FFu >> ri) & 1) && !out_bin_fmt) die("intrinsic is only available in bin output", n->line);
+                if (((0x71FFu >> ri) & 1) && !out_bin_fmt && !out_efi_mode) die("intrinsic is only available in bin output", n->line);
                 long a0 = ac > 0 ? x64_const_value(n->data.call.args[0], n->line) : 0;
                 long a1 = ac > 1 ? x64_const_value(n->data.call.args[1], n->line) : 0;
                 switch (ri) {
@@ -3682,9 +3684,10 @@ static void out_write_pe(const char *filename) {
     int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0755);
     if (fd < 0) { perror("open"); exit(1); }
 
+    const uint32_t impsz = (uint32_t)emit_pe_impsz;
     const uint32_t body = (emit_len + 15) & ~15;
     const uint32_t imp_rva = emit_pcb + body;
-    const uint32_t vsize = body + 176;
+    const uint32_t vsize = body + impsz;
     uint8_t h[EMIT_PE_SECT_SIZE] = {0}, imp[176] = {0}, zero[16] = {0};
 
     h[0] = 'M'; h[1] = 'Z';
@@ -3704,35 +3707,39 @@ static void out_write_pe(const char *filename) {
     emit_put_le(h + 0x88, 6, 2);
     emit_put_le(h + 0x90, emit_pcb + vsize + ((sym_gsize + 15) & ~15), 4);
     emit_put_le(h + 0x94, emit_pcb, 4);
-    emit_put_le(h + 0x9C, 3, 2);
+    emit_put_le(h + 0x9C, out_efi_mode ? 10 : 3, 2);
     emit_put_le(h + 0xA0, 0x100000, 8);
     emit_put_le(h + 0xA8, 0x1000, 8);
     emit_put_le(h + 0xB0, 0x100000, 8);
     emit_put_le(h + 0xB8, 0x1000, 8);
     emit_put_le(h + 0xC4, 16, 4);
-    emit_put_le(h + 0xD0, imp_rva, 4);
-    emit_put_le(h + 0xD4, 40, 4);
+    if (!out_efi_mode) {
+        emit_put_le(h + 0xD0, imp_rva, 4);
+        emit_put_le(h + 0xD4, 40, 4);
+    }
     emit_put_le(h + 0x150, vsize + sym_gsize, 4);
     emit_put_le(h + 0x154, emit_pcb, 4);
     emit_put_le(h + 0x158, vsize, 4);
     emit_put_le(h + 0x15C, emit_pcb, 4);
     emit_put_le(h + 0x16C, sym_gsize ? 0xE00000E0 : 0x60000020, 4);
 
-    emit_put_le(imp + 12, imp_rva + 104, 4);
-    emit_put_le(imp + 16, imp_rva + 72, 4);
-    memcpy(imp + 104, "kernel32.dll", 13);
-    const char *FN[3] = { "GetStdHandle", "WriteFile", "ExitProcess" };
-    for (int i = 0, off = 120; i < 3; i++) {
-        emit_put_le(imp + 40 + i * 8, imp_rva + off, 4);
-        emit_put_le(imp + 72 + i * 8, imp_rva + off, 4);
-        memcpy(imp + off + 2, FN[i], strlen(FN[i]));
-        off += (int)(strlen(FN[i]) + 4) & ~1;
+    if (!out_efi_mode) {
+        emit_put_le(imp + 12, imp_rva + 104, 4);
+        emit_put_le(imp + 16, imp_rva + 72, 4);
+        memcpy(imp + 104, "kernel32.dll", 13);
+        const char *FN[3] = { "GetStdHandle", "WriteFile", "ExitProcess" };
+        for (int i = 0, off = 120; i < 3; i++) {
+            emit_put_le(imp + 40 + i * 8, imp_rva + off, 4);
+            emit_put_le(imp + 72 + i * 8, imp_rva + off, 4);
+            memcpy(imp + off + 2, FN[i], strlen(FN[i]));
+            off += (int)(strlen(FN[i]) + 4) & ~1;
+        }
     }
 
     write(fd, h, emit_pcb);
     write(fd, emit_buf, emit_len);
     if (body > (uint32_t)emit_len) write(fd, zero, body - emit_len);
-    write(fd, imp, 176);
+    if (!out_efi_mode) write(fd, imp, 176);
     close(fd);
 }
 
@@ -5616,6 +5623,8 @@ int main(int argc, char **argv) {
         if (!strcmp(a, "-f") && ai + 1 < argc) {
             const char *v = argv[++ai];
             cli_fmt = !strcmp(v, "bin") ? FMT_BIN : !strcmp(v, "pe") ? FMT_PE : FMT_ELF;
+            out_efi_mode = !strcmp(v, "efi");
+            if (out_efi_mode) cli_fmt = FMT_PE;
         } else if (!strcmp(a, "-b") && ai + 1 < argc) cli_base = lex_number(argv[++ai]);
         else if (!strcmp(a, "-e") && ai + 1 < argc) cli_entry = argv[++ai];
         else if (!strcmp(a, "-r")) cli_free = 1;
@@ -5634,7 +5643,8 @@ int main(int argc, char **argv) {
     const char *out = npos >= 2 ? argv[argc - 1] : "a.out";
     int nsrc = npos >= 2 ? npos - 1 : npos;
     size_t ol = strlen(out);
-    out_format = ol >= 4 && !memcmp(out + ol - 4, ".exe", 4) ? FMT_PE : FMT_ELF;
+    if (ol >= 4 && !memcmp(out + ol - 4, ".efi", 4)) { out_format = FMT_PE; out_efi_mode = 1; }
+    else out_format = ol >= 4 && !memcmp(out + ol - 4, ".exe", 4) ? FMT_PE : FMT_ELF;
 
     struct TOKEN *tokens = NULL;
     int tcnt = 0, tcap = 0;
@@ -5664,8 +5674,11 @@ int main(int argc, char **argv) {
     if (cli_free >= 0) out_freestanding = cli_free;
     if (out_raw_mode) { out_format = FMT_BIN; out_freestanding = 1; }
     if (out_boot_mode) { out_format = FMT_BIN; out_freestanding = 1; out_load_base = 0x100000; }
+    if (out_efi_mode) { out_format = FMT_PE; out_freestanding = 1; }
     if (out_format == FMT_BIN) out_freestanding = 1;
     emit_is_pe = out_format == FMT_PE;
+    emit_pe_impsz = out_efi_mode ? 0 : 176;
+    if (cli_backend >= 1 && out_efi_mode) die("IR backend does not support EFI output yet", 0);
 
     if (!out_raw_mode && !getenv("LGC_NO_OPT")) opt_run(root);
 
