@@ -5758,6 +5758,13 @@ static void ircg_generate(struct AST_NODE *root) {
     emit_shrink_relayout();
     emit_pcb = (EMIT_PE_SECT_SIZE + 15) & ~15;
     emit_apply_patches();
+    if (emit_is_pe) {
+        uint32_t imp_rva = emit_pcb + ((emit_len + 15) & ~15);
+        for (int i = 0; i < emit_niat; i++) {
+            int pos = EMIT_IAT_PATCH[i] >> 2, slot = EMIT_IAT_PATCH[i] & 3;
+            *(int32_t *)(emit_buf + pos) = imp_rva + 72 + (slot << 3) - (emit_pcb + pos + 4);
+        }
+    }
 }
 
 static void x64_reset_state(void) {
@@ -5776,7 +5783,7 @@ int main(int argc, char **argv) {
     long long cli_base = -1;
     char *cli_entry = NULL;
     for (; ai < argc; ai++) {
-        const char *a = argv[ai];
+        const char *a = argv[ai]; 
         if (a[0] != '-' || !a[1]) break;
         if (!strcmp(a, "-f") && ai + 1 < argc) {
             const char *v = argv[++ai];
