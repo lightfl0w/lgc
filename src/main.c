@@ -1065,6 +1065,7 @@ static void x64_greg_zero(int r) { EMIT((uint8_t)(0x40 | ((r >= 8) << 2) | (r >=
 
 static void emit_apply_patches(void) {
     for (int i = 0; i < emit_npatch; i++) {
+        if (EMIT_PATCHES[i].g < 0) continue;
         int p = EMIT_PATCHES[i].pos, t = 0, sz = emit_patch_size[i];
         int64_t rel;
         if (EMIT_PATCHES[i].g == 0) t = emit_label_pos[EMIT_PATCHES[i].lab];
@@ -1090,10 +1091,10 @@ static int emit_sh_flag[8192], emit_sh_kind[8192], emit_sh_patch[8192], emit_sh_
 
 static void emit_shrink_relayout(void) {
     emit_sh_nc = 0;
+    for (int i = 0; i < emit_npatch; i++) emit_sh_flag[i] = 0;
     for (int i = 0; i < emit_npatch; i++) {
         if (EMIT_PATCHES[i].g != 0) continue;
         int p = EMIT_PATCHES[i].pos;
-        emit_sh_flag[i] = 0;
         if (emit_buf[p - 1] == 0xE9) { emit_sh_patch[emit_sh_nc] = i; emit_sh_kind[emit_sh_nc] = 0; emit_sh_nc++; }
         else if (emit_buf[p - 2] == 0x0F && (emit_buf[p - 1] & 0xF0) == 0x80) { emit_sh_patch[emit_sh_nc] = i; emit_sh_kind[emit_sh_nc] = 1; emit_sh_nc++; }
     }
@@ -1101,8 +1102,14 @@ static void emit_shrink_relayout(void) {
     for (int iter = 0; iter < 64; iter++) {
         memset(emit_sh_del, 0, oldlen);
         for (int k = 0; k < emit_sh_nc; k++) {
-            if (!emit_sh_flag[emit_sh_patch[k]]) continue;
-            int p = EMIT_PATCHES[emit_sh_patch[k]].pos;
+            int i = emit_sh_patch[k];
+            if (!emit_sh_flag[i]) continue;
+            int p = EMIT_PATCHES[i].pos;
+            if (emit_sh_flag[i] == 2) {
+                int lo = emit_sh_kind[k] == 0 ? p - 1 : p - 2;
+                for (int x = lo; x <= p + 3; x++) emit_sh_del[x] = 1;
+                continue;
+            }
             if (emit_sh_kind[k] == 1) emit_sh_del[p - 1] = 1;
             emit_sh_del[p + 1] = emit_sh_del[p + 2] = emit_sh_del[p + 3] = 1;
         }
@@ -1112,13 +1119,15 @@ static void emit_shrink_relayout(void) {
         for (int k = 0; k < emit_sh_nc; k++) {
             int i = emit_sh_patch[k]; if (emit_sh_flag[i]) continue;
             int p = EMIT_PATCHES[i].pos;
+            int len = emit_sh_kind[k] == 0 ? 4 : 3;
+            if (emit_sh_map[emit_label_pos[EMIT_PATCHES[i].lab]] == emit_sh_map[p + len]) { emit_sh_flag[i] = 2; changed = 1; continue; }
             int rel = emit_sh_map[emit_label_pos[EMIT_PATCHES[i].lab]] - (emit_sh_map[p] + 1);
             if (rel >= -128 && rel <= 127) { emit_sh_flag[i] = 1; changed = 1; }
         }
         if (!changed) break;
     }
     for (int k = 0; k < emit_sh_nc; k++) {
-        int i = emit_sh_patch[k]; if (!emit_sh_flag[i]) continue;
+        int i = emit_sh_patch[k]; if (!emit_sh_flag[i] || emit_sh_flag[i] == 2) continue;
         int p = EMIT_PATCHES[i].pos;
         if (emit_sh_kind[k] == 0) emit_buf[p - 1] = 0xEB;
         else emit_buf[p - 2] = (uint8_t)((emit_buf[p - 1] & 0x0F) | 0x70);
@@ -1129,6 +1138,7 @@ static void emit_shrink_relayout(void) {
     for (int l = 0; l < emit_nlabel; l++) emit_label_pos[l] = emit_sh_map[emit_label_pos[l]];
     emit_entry_off = emit_sh_map[emit_entry_off];
     for (int i = 0; i < emit_npatch; i++) {
+        if (emit_sh_flag[i] == 2) { EMIT_PATCHES[i].g = -1; continue; }
         EMIT_PATCHES[i].pos = emit_sh_map[EMIT_PATCHES[i].pos];
         if (EMIT_PATCHES[i].g == 0 && emit_sh_flag[i]) emit_patch_size[i] = 1;
     }
@@ -5055,7 +5065,13 @@ static void ir_out_of_ssa(struct IR_FUNC *f) {
             int np = 0;
             for (struct IR_INSN *in = b->head; in && in->op == IROP_PHI; in = in->next)
                 if (np < 512) phis[np++] = in;
-            for (int k = 0; k < np; k++) phis[k]->mk = ir_nreg++;
+            int need_mk = 0;
+            for (int k = 0; k < np && !need_mk; k++)
+                for (int j = 0; j < np && !need_mk; j++)
+                    for (int e = 0; e < phis[j]->nargs; e++)
+                        if (phis[j]->args[e].k == IRVK_REG && phis[j]->args[e].id == phis[k]->dst) need_mk = 1;
+            need_mk = 1;
+            for (int k = 0; k < np; k++) if (need_mk) phis[k]->mk = ir_nreg++;
             for (int pass = 0; pass < 2; pass++) {
                 for (int k = 0; k < np; k++) {
                     struct IR_INSN *phi = phis[k];
@@ -5065,9 +5081,14 @@ static void ir_out_of_ssa(struct IR_FUNC *f) {
                             if (bb->id == phi->ppred[e]) { pb = bb; break; }
                         if (!pb) continue;
                         struct IR_INSN *cp = calloc(1, sizeof *cp);
-                        cp->op = IROP_COPY; cp->dst = pass ? phi->dst : (int)phis[k]->mk;
-                        cp->ty = phi->ty;
-                        cp->a = pass ? ir_reg((int)phis[k]->mk) : phi->args[e];
+                        cp->op = IROP_COPY; cp->ty = phi->ty;
+                        if (need_mk) {
+                            cp->dst = pass ? phi->dst : (int)phis[k]->mk;
+                            cp->a = pass ? ir_reg((int)phis[k]->mk) : phi->args[e];
+                        } else {
+                            cp->dst = phi->dst;
+                            cp->a = phi->args[e];
+                        }
                         ir_insert_before_tail(pb, cp);
                     }
                 }
@@ -5077,6 +5098,7 @@ static void ir_out_of_ssa(struct IR_FUNC *f) {
         }
     }
     ir_unlink_dead(f);
+    if (getenv("LGC_DUMP_SSA") && !strcmp(f->nm, "main")) { printf("==== main after oossa ====\n"); ir_print_fn(f); }
 }
 
 static void ir_opt_function(struct IR_FUNC *f) {
@@ -5328,6 +5350,7 @@ static uint8_t ircg_rex_w(int rbit, int bbit) {
     return (uint8_t)(0x48 | (((rbit >> 3) & 1) << 2) | ((bbit >> 3) & 1));
 }
 
+static int ircg_flag_cc = -1, ircg_flag_id = -1;
 static void ircg_mov_rr(int dst, int src) {
     if (dst == src) return;
     EMIT(ircg_rex_w(src, dst), 0x89, (uint8_t)(0xC0 | ((src & 7) << 3) | (dst & 7)));
@@ -5354,6 +5377,18 @@ static void ircg_lea_rip(int dst, int lab, int kind) {
 }
 
 static void ircg_mov_ri(int dst, long long v) {
+    if (v == 0) {
+        if (dst >= 8) EMIT(0x45, 0x31, (uint8_t)(0xC0 | ((dst & 7) << 3) | (dst & 7)));
+        else EMIT(0x31, (uint8_t)(0xC0 | ((dst & 7) << 3) | (dst & 7)));
+        ircg_flag_cc = -1; ircg_flag_id = -1;
+        return;
+    }
+    if (v > 0 && v <= 0x7FFFFFFFLL) {
+        if (dst >= 8) EMIT(0x41, (uint8_t)(0xB8 | (dst & 7)));
+        else EMIT((uint8_t)(0xB8 | dst));
+        emit_imm(v, 4);
+        return;
+    }
     if (v >= -2147483648LL && v <= 2147483647LL) {
         EMIT((uint8_t)(0x48 | ((dst >> 3) & 1)), 0xC7, (uint8_t)(0xC0 | (dst & 7)));
         emit_imm(v, 4);
@@ -5412,7 +5447,10 @@ static void ircg_prologue(struct IR_ALLOC *al, int is_entry, struct IR_FUNC *f) 
     EMIT(0x55);
     EMIT(0x48, 0x89, 0xE5);
     for (int i = 0; i < al->nsaved; i++) ircg_push(al->saved[i]);
-    if (al->framesz > 0) { EMIT(0x48, 0x81, 0xEC); emit_imm(al->framesz, 4); }
+    if (al->framesz > 0) {
+        if (al->framesz <= 127) EMIT(0x48, 0x83, 0xEC, (uint8_t)al->framesz);
+        else { EMIT(0x48, 0x81, 0xEC); emit_imm(al->framesz, 4); }
+    }
     if (is_entry) return;
     static const int preg[6] = { 7, 6, 2, 1, 8, 9 };
     if (f->np > 6) die("IR backend supports at most 6 parameters", 0);
@@ -5434,6 +5472,27 @@ static void ircg_emit_func(struct IR_FUNC *f, int is_entry) {
     int blab[IR_BLOCK_MAX], nb = 0;
     for (struct IR_BLOCK *b = f->blocks; b; b = b->next) blab[nb++] = emit_new_label();
     int epilab = emit_new_label();
+
+    int maxid = 0;
+    for (struct IR_BLOCK *b = f->blocks; b; b = b->next)
+        for (struct IR_INSN *in = b->head; in; in = in->next) {
+            if (in->dst > maxid) maxid = in->dst;
+            if (in->a.k == IRVK_REG && in->a.id > maxid) maxid = in->a.id;
+            if (in->b.k == IRVK_REG && in->b.id > maxid) maxid = in->b.id;
+            for (int k = 0; k < in->nargs; k++)
+                if (in->args[k].k == IRVK_REG && in->args[k].id > maxid) maxid = in->args[k].id;
+        }
+    int *uop = calloc((size_t)maxid + 1, sizeof(int));
+    int *ucb = calloc((size_t)maxid + 1, sizeof(int));
+    int *ucnt = calloc((size_t)maxid + 1, sizeof(int));
+    for (struct IR_BLOCK *b = f->blocks; b; b = b->next)
+        for (struct IR_INSN *in = b->head; in; in = in->next) {
+            if (in->dst >= 0 && in->dst <= maxid) uop[in->dst] = in->op;
+            if (in->a.k == IRVK_REG && in->a.id >= 0 && in->a.id <= maxid) { ucnt[in->a.id]++; if (in->op == IROP_CBR) ucb[in->a.id] = 1; }
+            if (in->b.k == IRVK_REG && in->b.id >= 0 && in->b.id <= maxid) ucnt[in->b.id]++;
+            for (int k = 0; k < in->nargs; k++)
+                if (in->args[k].k == IRVK_REG && in->args[k].id >= 0 && in->args[k].id <= maxid) ucnt[in->args[k].id]++;
+        }
 
     if (f->naked) {
         for (struct IR_BLOCK *b = f->blocks; b; b = b->next)
@@ -5457,8 +5516,12 @@ static void ircg_emit_func(struct IR_FUNC *f, int is_entry) {
                     switch (in->sub) {
                         case IRBIN_SHL: case IRBIN_SAR: {
                             ircg_load_to(0, in->a, &al);
-                            ircg_load_to(1, in->b, &al);
-                            EMIT(0x48, 0xD3, (uint8_t)((in->sub == IRBIN_SHL ? 0xE0 : 0xF8) | 0));
+                            if (in->b.k == IRVK_CONST && in->b.c >= 0 && in->b.c <= 63) {
+                                EMIT(0x48, 0xC1, (uint8_t)(in->sub == IRBIN_SHL ? 0xE0 : 0xF8), (uint8_t)in->b.c);
+                            } else {
+                                ircg_load_to(1, in->b, &al);
+                                EMIT(0x48, 0xD3, (uint8_t)((in->sub == IRBIN_SHL ? 0xE0 : 0xF8) | 0));
+                            }
                             ircg_store_from(0, in->dst, &al);
                             break;
                         }
@@ -5499,35 +5562,47 @@ static void ircg_emit_func(struct IR_FUNC *f, int is_entry) {
                             break;
                         }
                     }
+                    ircg_flag_cc = -1; ircg_flag_id = -1;
                     break;
                 }
                 case IROP_ICMP: {
                     static const int cc[6] = { 0x94, 0x95, 0x9C, 0x9E, 0x9F, 0x9D };
-                    ircg_load_to(0, in->a, &al);
-                    ircg_arith(5, 0, in->b, ircg_val_reg(in->b, &al), &al);
+                    int ra = (in->a.k == IRVK_REG && in->a.id >= 0 && in->a.id < al.nreg) ? al.reg[in->a.id] : -1;
+                    int acc0;
+                    if (ra >= 0) acc0 = ra;
+                    else { ircg_load_to(0, in->a, &al); acc0 = 0; }
+                    ircg_arith(5, acc0, in->b, ircg_val_reg(in->b, &al), &al);
+                    if (in->dst >= 0 && in->dst <= maxid && ucnt[in->dst] == 1 && ucb[in->dst]) {
+                        ircg_flag_cc = in->sub; ircg_flag_id = in->dst;
+                        break;
+                    }
                     EMIT(0x0F, (uint8_t)cc[in->sub], 0xC0);
                     EMIT(0x0F, 0xB6, 0xC0);
                     ircg_store_from(0, in->dst, &al);
+                    ircg_flag_cc = in->sub; ircg_flag_id = in->dst;
                     break;
                 }
                 case IROP_LOAD: {
-                    ircg_load_to(0, in->a, &al);
                     int rd = (in->dst >= 0 && al.reg[in->dst] >= 0) ? al.reg[in->dst] : 0;
+                    int ra = (in->a.k == IRVK_REG && in->a.id >= 0 && in->a.id < al.nreg) ? al.reg[in->a.id] : -1;
+                    if ((ra & 7) == 4 || (ra & 7) == 5) ra = -1;
+                    if (ra < 0) { ircg_load_to(0, in->a, &al); ra = 0; }
                     if (in->ty == IRTY_I8)
-                        EMIT((uint8_t)(0x48 | (((rd >> 3) & 1) << 2)), 0x0F, 0xB6, (uint8_t)((rd << 3) & 0x38));
+                        EMIT((uint8_t)(0x48 | ((rd >= 8) << 2) | (ra >= 8)), 0x0F, 0xB6, (uint8_t)(0x00 | ((rd & 7) << 3) | (ra & 7)));
                     else if (in->ty == IRTY_I32)
-                        EMIT((uint8_t)(0x40 | (((rd >> 3) & 1) << 2)), 0x8B, (uint8_t)((rd << 3) & 0x38));
+                        EMIT((uint8_t)(0x40 | ((rd >= 8) << 2) | (ra >= 8)), 0x8B, (uint8_t)(0x00 | ((rd & 7) << 3) | (ra & 7)));
                     else
-                        EMIT((uint8_t)(0x48 | (((rd >> 3) & 1) << 2)), 0x8B, (uint8_t)((rd << 3) & 0x38));
+                        EMIT((uint8_t)(0x48 | ((rd >= 8) << 2) | (ra >= 8)), 0x8B, (uint8_t)(0x00 | ((rd & 7) << 3) | (ra & 7)));
                     ircg_store_from(rd, in->dst, &al);
                     break;
                 }
                 case IROP_STORE: {
-                    ircg_load_to(0, in->a, &al);
+                    int ra = (in->a.k == IRVK_REG && in->a.id >= 0 && in->a.id < al.nreg) ? al.reg[in->a.id] : -1;
+                    if (ra < 0) { ircg_load_to(0, in->a, &al); ra = 0; }
                     ircg_load_to(1, in->b, &al);
-                    if (in->ty == IRTY_I8) EMIT(0x88, 0x01);
-                    else if (in->ty == IRTY_I32) EMIT(0x89, 0x01);
-                    else EMIT(0x48, 0x89, 0x01);
+                    if (in->ty == IRTY_I8) { if (ra >= 8) EMIT(0x44); EMIT(0x88, (uint8_t)(0x01 | ((ra & 7) << 3))); }
+                    else if (in->ty == IRTY_I32) { if (ra >= 8) EMIT(0x44); EMIT(0x89, (uint8_t)(0x01 | ((ra & 7) << 3))); }
+                    else EMIT((uint8_t)(0x48 | ((ra >= 8) << 2)), 0x89, (uint8_t)(0x01 | ((ra & 7) << 3)));
                     break;
                 }
                 case IROP_ALLOCA: {
@@ -5543,12 +5618,22 @@ static void ircg_emit_func(struct IR_FUNC *f, int is_entry) {
                     ircg_load_to(acc, in->a, &al);
                     ircg_arith(0, acc, in->b, rb, &al);
                     ircg_store_from(acc, in->dst, &al);
+                    ircg_flag_cc = -1; ircg_flag_id = -1;
                     break;
                 }
                 case IROP_COPY: {
-                    int rd = (in->dst >= 0 && al.reg[in->dst] >= 0) ? al.reg[in->dst] : 0;
-                    ircg_load_to(rd, in->a, &al);
-                    ircg_store_from(rd, in->dst, &al);
+                    int rd = (in->dst >= 0 && al.reg[in->dst] >= 0) ? al.reg[in->dst] : -1;
+                    int ra = (in->a.k == IRVK_REG && in->a.id >= 0 && in->a.id < al.nreg) ? al.reg[in->a.id] : -1;
+                    if (rd < 0 && ra >= 0) { ircg_mov_mr((int)al.slot[in->dst], ra); break; }
+                    if (rd < 0 && in->a.k == IRVK_CONST && in->ty == IRTY_I64) {
+                        EMIT(0x48, 0xC7);
+                        x64_rbp_disp(0, (int)al.slot[in->dst]);
+                        emit_imm(in->a.c, 4);
+                        break;
+                    }
+                    int r = rd >= 0 ? rd : 0;
+                    ircg_load_to(r, in->a, &al);
+                    ircg_store_from(r, in->dst, &al);
                     break;
                 }
                 case IROP_ZEXT: case IROP_TRUNC: {
@@ -5574,6 +5659,7 @@ static void ircg_emit_func(struct IR_FUNC *f, int is_entry) {
                     EMIT(0xE8);
                     emit_patch(0, SYM_FUNCS[fi].lab);
                     ircg_store_from(0, in->dst, &al);
+                    ircg_flag_cc = -1; ircg_flag_id = -1;
                     break;
                 }
                 case IROP_SYSCALL: {
@@ -5583,6 +5669,7 @@ static void ircg_emit_func(struct IR_FUNC *f, int is_entry) {
                     for (int k = 1; k < 4; k++) ircg_load_to(sarg[k - 1], in->args[k], &al);
                     EMIT(0x0F, 0x05);
                     ircg_store_from(0, in->dst, &al);
+                    ircg_flag_cc = -1; ircg_flag_id = -1;
                     break;
                 }
                 case IROP_PRINT: {
@@ -5590,6 +5677,7 @@ static void ircg_emit_func(struct IR_FUNC *f, int is_entry) {
                     ircg_load_to(0, in->a, &al);
                     EMIT(0xE8);
                     emit_patch(0, in->sub ? out_print_str_label : out_print_label);
+                    ircg_flag_cc = -1; ircg_flag_id = -1;
                     break;
                 }
                 case IROP_KERN: {
@@ -5626,6 +5714,7 @@ static void ircg_emit_func(struct IR_FUNC *f, int is_entry) {
                         break;
                     }
                     ircg_store_from(0, in->dst, &al);
+                    ircg_flag_cc = -1; ircg_flag_id = -1;
                     break;
                 }
                 case IROP_BR: {
@@ -5637,17 +5726,26 @@ static void ircg_emit_func(struct IR_FUNC *f, int is_entry) {
                     break;
                 }
                 case IROP_CBR: {
-                    ircg_load_to(0, in->a, &al);
-                    EMIT(0x48, 0x85, 0xC0);
                     int tt1 = 0, tt2 = 0, i2 = 0;
                     for (struct IR_BLOCK *bb = f->blocks; bb; bb = bb->next, i2++) {
                         if (bb->id == in->t1) tt1 = i2;
                         if (bb->id == in->t2) tt2 = i2;
                     }
-                    EMIT(0x0F, 0x84);
-                    emit_rel32(blab[tt2]);
-                    EMIT(0xE9);
-                    emit_rel32(blab[tt1]);
+                    if (ircg_flag_cc >= 0 && in->a.k == IRVK_REG && in->a.id == ircg_flag_id) {
+                        static const int jccop[6] = { 0x84, 0x85, 0x8C, 0x8E, 0x8F, 0x8D };
+                        EMIT(0x0F, (uint8_t)jccop[ircg_flag_cc]);
+                        emit_rel32(blab[tt1]);
+                        EMIT(0xE9);
+                        emit_rel32(blab[tt2]);
+                    } else {
+                        ircg_load_to(0, in->a, &al);
+                        EMIT(0x48, 0x85, 0xC0);
+                        EMIT(0x0F, 0x84);
+                        emit_rel32(blab[tt2]);
+                        EMIT(0xE9);
+                        emit_rel32(blab[tt1]);
+                    }
+                    ircg_flag_cc = -1; ircg_flag_id = -1;
                     break;
                 }
                 case IROP_RET: {
@@ -5665,6 +5763,7 @@ static void ircg_emit_func(struct IR_FUNC *f, int is_entry) {
         if (f->naked) EMIT(0xC3);
         else ircg_epilogue(&al);
     }
+    free(uop); free(ucb); free(ucnt);
     ircg_free_alloc(&al);
 }
 
