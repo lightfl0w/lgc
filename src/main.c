@@ -5368,19 +5368,45 @@ static void ircg_mov_rr(int dst, int src) {
     EMIT(ircg_rex_w(src, dst), 0x89, (uint8_t)(0xC0 | ((src & 7) << 3) | (dst & 7)));
 }
 
+static int ircg_ph_kind = -1;   
+static int ircg_ph_pos, ircg_ph_len, ircg_ph_reg, ircg_ph_off;
+
 static void ircg_mov_rm(int dst, long off) {
+    if (ircg_ph_kind == 1 && ircg_ph_pos + ircg_ph_len == emit_len && ircg_ph_off == off) {
+        ircg_ph_kind = -1;
+        if (ircg_ph_reg == dst) return;
+        ircg_mov_rr(dst, ircg_ph_reg);
+        return;
+    }
+    if (ircg_ph_kind >= 0 && ircg_ph_kind != 1 &&
+        ircg_ph_pos + ircg_ph_len == emit_len && ircg_ph_reg == dst)
+        emit_len = ircg_ph_pos;
+    int pos = emit_len;
     EMIT((uint8_t)(0x48 | (((dst >> 3) & 1) << 2)), 0x8B);
     x64_rbp_disp(dst & 7, (int)off);
+    ircg_ph_kind = 0; ircg_ph_pos = pos; ircg_ph_len = emit_len - pos; ircg_ph_reg = dst; ircg_ph_off = (int)off;
 }
 
 static void ircg_mov_mr(long off, int src) {
+    if (ircg_ph_kind == 0 && ircg_ph_pos + ircg_ph_len == emit_len &&
+        ircg_ph_reg == src && ircg_ph_off == off) {
+        ircg_ph_kind = -1;
+        return;
+    }
+    int pos = emit_len;
     EMIT((uint8_t)(0x48 | (((src >> 3) & 1) << 2)), 0x89);
     x64_rbp_disp(src & 7, (int)off);
+    ircg_ph_kind = 1; ircg_ph_pos = pos; ircg_ph_len = emit_len - pos; ircg_ph_reg = src; ircg_ph_off = (int)off;
 }
 
 static void ircg_lea_rbp(int dst, long off) {
+    if (ircg_ph_kind >= 0 && ircg_ph_kind != 1 &&
+        ircg_ph_pos + ircg_ph_len == emit_len && ircg_ph_reg == dst)
+        emit_len = ircg_ph_pos;
+    int pos = emit_len;
     EMIT((uint8_t)(0x48 | (((dst >> 3) & 1) << 2)), 0x8D);
     x64_rbp_disp(dst & 7, (int)off);
+    ircg_ph_kind = 2; ircg_ph_pos = pos; ircg_ph_len = emit_len - pos; ircg_ph_reg = dst; ircg_ph_off = (int)off;
 }
 
 static void ircg_lea_rip(int dst, int lab, int kind) {
@@ -5520,6 +5546,7 @@ static void ircg_emit_func(struct IR_FUNC *f, int is_entry) {
     int bi = 0;
     for (struct IR_BLOCK *b = f->blocks; b; b = b->next, bi++) {
         emit_put_label(blab[bi]);
+        ircg_ph_kind = -1;
         for (struct IR_INSN *in = b->head; in; in = in->next) {
             switch (in->op) {
                 case IROP_BIN: {
@@ -5772,6 +5799,7 @@ static void ircg_emit_func(struct IR_FUNC *f, int is_entry) {
     }
     if (!is_entry) {
         emit_put_label(epilab);
+        ircg_ph_kind = -1;
         if (f->naked) EMIT(0xC3);
         else ircg_epilogue(&al);
     }
@@ -5797,6 +5825,7 @@ static void ircg_emit_entry(void) {
         ircg_exit_label = emit_new_label();
         ircg_emit_func(fe, 1);
         emit_put_label(ircg_exit_label);
+        ircg_ph_kind = -1;
         ircg_exit_label = -1;
     }
     int mi = sym_func_find(out_entry_name ? out_entry_name : "main");
