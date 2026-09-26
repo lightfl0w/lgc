@@ -52,6 +52,9 @@ const TOK_PERCENT_EQ = 50;
 const TOK_PERCENT = 51;
 const TOK_AT = 52;
 const TOK_FOR = 53;
+const TOK_IN = 54;
+const TOK_DOTDOT = 55;
+const TOK_NAKED = 56;
 
 const NODE_NUMBER = 1;
 const NODE_VARIABLE = 2;
@@ -133,10 +136,10 @@ let int emit_patch_pos[8192]; let int emit_patch_value[8192]; let int emit_patch
 let int sym_const_name[256]; let int sym_const_value[256]; let int sym_nconst;
 let int lex_keywords[13]; let int parse_binop[64]; let int lex_punct1[128]; let int lex_punct2[128];
 let int sym_break_label[64]; let int sym_cont_label[64]; let int sym_nloop;
-let int parse_tok_pos; let int lex_line; let int lex_src_pos; let int sym_frame_off;
-let int emit_lit_label; let int emit_print_label; let int emit_print_str_label; let int emit_entry_off; let int parse_root; let int lex_name_syscall; let int lex_name_const; let int lex_name_for; let int lex_name_argv1; let int lex_name_argv2;
+let int parse_tok_pos; let int lex_line; let int lex_src_pos; let int sym_frame_off; let int sym_frame_min; let int emit_frame_patch;
+let int emit_lit_label; let int emit_print_label; let int emit_print_str_label; let int emit_entry_off; let int parse_root; let int lex_name_syscall; let int lex_name_const; let int lex_name_for; let int lex_name_in; let int lex_name_naked; let int lex_name_addr; let int lex_name_argv1; let int lex_name_argv2;
 let int emit_hdr_size; let int emit_seg_base;
-let int emit_tmp1; let int emit_tmp2; let int lex_char; let int lex_next_eq; let int out_fd; let char* out_name;
+let int emit_tmp1; let int emit_tmp2; let int lex_char; let int lex_next_eq; let int out_fd; let int out_naked; let int parse_naked; let char* out_name;
 let char* argv1; let char* argv2; let char* argv3; let char* argv4;
 let char* argv5; let char* argv6; let char* argv7; let char* argv8;
 let int out_format; let int out_load_base; let int out_entry_name; let int out_freestanding;
@@ -146,8 +149,8 @@ let int lex_name_base; let int lex_name_entry; let int lex_name_bin; let int lex
 let int lex_name_asm; let int lex_name_cli; let int lex_name_sti; let int lex_name_hlt; let int lex_name_iretq;
 let int lex_name_lgdt; let int lex_name_lidt; let int lex_name_setcr3; let int lex_name_inb; let int lex_name_inl; let int lex_name_outb; let int lex_name_outl;
 let int out_raw_mode; let int lex_name_raw;
-let int out_boot_mode; let int lex_name_boot;
-let int out_boot_words[67];
+let int out_boot_mode; let int lex_name_boot; let int out_gpad; let char boot_sec[1024];
+let int out_boot_words[71];
 let int raw_names[32]; let int raw_nargs[32];
 let int raw_labels[64]; let int raw_label_ok[64];
 let int raw_patch_pos[128]; let int raw_patch_kind[128]; let int raw_patch_id[128]; let int raw_npatch;
@@ -300,6 +303,8 @@ func lex_next_token() {
         }
         if ((t == TOK_IDENT) && lex_name_eq_span(s, lex_src_pos, lex_name_const)) t = TOK_CONST;
         if ((t == TOK_IDENT) && lex_name_eq_span(s, lex_src_pos, lex_name_for)) t = TOK_FOR;
+        if ((t == TOK_IDENT) && lex_name_eq_span(s, lex_src_pos, lex_name_in)) t = TOK_IN;
+        if ((t == TOK_IDENT) && lex_name_eq_span(s, lex_src_pos, lex_name_naked)) t = TOK_NAKED;
         if (t == TOK_IDENT) v = lex_intern_span(s, lex_src_pos);
         lex_add_token(t, v);
         return 0;
@@ -345,6 +350,7 @@ func lex_next_token() {
         return 0;
     }
     if (c > 127) util_die(lex_line, "bad character");
+    if ((c == '.') && (lex_src[lex_src_pos + 1] == '.')) { lex_add_token(TOK_DOTDOT, 0); lex_src_pos = lex_src_pos + 2; return 0; }
     if ((c == '&') && (lex_src[lex_src_pos + 1] == '&')) { lex_add_token(TOK_ANDAND, 0); lex_src_pos = lex_src_pos + 2; return 0; }
     if ((c == '|') && (lex_src[lex_src_pos + 1] == '|')) { lex_add_token(TOK_OROR, 0); lex_src_pos = lex_src_pos + 2; return 0; }
     if (((c == '<') || (c == '>')) && (lex_src[lex_src_pos + 1] == c)) {
@@ -587,6 +593,9 @@ func parse_stmt() {
     let int n = 0;
     let int pc = 0;
     let int i = 0;
+    let int rv = 0;
+    let int lo = 0;
+    let int hi = 0;
     let int t = parse_tok();
     if (t == TOK_CONST) {
         parse_tok_pos = parse_tok_pos + 1;
@@ -649,6 +658,19 @@ func parse_stmt() {
     }
     if (t == TOK_FOR) {
         parse_tok_pos = parse_tok_pos + 1;
+        if ((parse_tok() == TOK_IDENT) && (lex_tok_kind[parse_tok_pos + 1] == TOK_IN)) {
+            rv = lex_tok_value[parse_tok_pos];
+            parse_tok_pos = parse_tok_pos + 2;
+            lo = parse_expr();
+            parse_eat(TOK_DOTDOT, "expected ..");
+            hi = parse_expr();
+            n = ast_new(NODE_FOR, 0, 0, 0);
+            ast_a[n] = ast_new(NODE_LET, lo, TYPE_INT, rv);
+            ast_b[n] = ast_new(NODE_BINARY, ast_new(NODE_VARIABLE, 0, 0, rv), hi, BIN_LT);
+            ast_v[n] = ast_new(NODE_ASSIGN, ast_new(NODE_VARIABLE, 0, 0, rv), ast_new(NODE_NUMBER, 0, 0, 1), BIN_ADD + 1);
+            ast_c[n] = parse_stmt();
+            return n;
+        }
         parse_eat(TOK_LPAREN, "expected (");
         n = ast_new(NODE_FOR, 0, 0, 0);
         if (parse_tok() != TOK_SEMI) ast_a[n] = parse_stmt();      
@@ -709,6 +731,8 @@ func parse_func() {
     parse_tok_pos = parse_tok_pos + 1;
     parse_eat(TOK_IDENT, "func name");
     n = ast_new(NODE_FUNCTION, 0, 0, lex_tok_value[parse_tok_pos - 1]);
+    ast_c[n] = parse_naked;
+    parse_naked = 0;
     parse_eat(TOK_LPAREN, "expected (");
     if (parse_tok() != TOK_RPAREN) {
         parse_eat(TOK_IDENT, "param name");
@@ -755,7 +779,8 @@ func parse_program() {
     let int h = 0;
     while (parse_tok() != TOK_EOF) {
         if (parse_tok() == TOK_AT) parse_directive();
-        else if (parse_tok() == TOK_FUNC) h = ast_append(h, parse_func());
+        else if (parse_tok() == TOK_NAKED) { parse_tok_pos = parse_tok_pos + 1; if (parse_tok() != TOK_FUNC) util_die(lex_tok_line[parse_tok_pos], "naked must precede func"); parse_naked = 1; h = ast_append(h, parse_func()); }
+        else if (parse_tok() == TOK_FUNC) { parse_naked = 0; h = ast_append(h, parse_func()); }
         else h = ast_append(h, parse_stmt());
     }
     return ast_new(NODE_BLOCK, h, 0, 0);
@@ -774,6 +799,7 @@ func sym_local_find(nm) {
 func sym_local_add(nm, t) {
     if (sym_nlocal >= 512) util_die(0, "local overflow");
     sym_frame_off = sym_frame_off - type_size(t);
+    if (sym_frame_off < sym_frame_min) sym_frame_min = sym_frame_off;
     sym_local_name[sym_nlocal] = nm; sym_local_ty[sym_nlocal] = t; sym_local_off[sym_nlocal] = sym_frame_off;
     sym_nlocal = sym_nlocal + 1;
     return sym_nlocal - 1;
@@ -990,7 +1016,16 @@ func x64_je_rel(l)         { emit_u8(15); emit_u8(132); emit_patch(0, l); }
 func x64_jne_rel(l)        { emit_u8(15); emit_u8(133); emit_patch(0, l); }
 func x64_leave_ret()       { emit_u8(201); emit_u8(195); }
 func x64_pop_rdi_rsi_rdx() { emit_u8(95); emit_u8(94); emit_u8(90); }
-func x64_prologue()        { emit_u8(85); emit_u8(72); emit_u8(137); emit_u8(229); emit_u8(72); emit_u8(131); emit_u8(236); emit_u8(64); }
+func x64_prologue()        { emit_u8(85); emit_u8(72); emit_u8(137); emit_u8(229); emit_u8(72); emit_u8(129); emit_u8(236); emit_frame_patch = emit_len; emit_u32(0); }
+
+func x64_patch_prologue(p) {
+    let int need = 0;
+    need = 0 - sym_frame_min + 32 + 15;
+    need = need / 16 * 16;
+    if (need < 32) need = 32;
+    emit_poke32(p, need);
+    return 0;
+}
 
 
 func emit_cli()        { emit_u8(250); }
@@ -1201,6 +1236,13 @@ func x64_gen_call(n) {
     let int k = 0;
     let int x0 = 0;
     let int x1 = 0;
+    if ((ast_v[n] == lex_name_addr) && (sym_func_find(ast_v[n]) < 0)) {
+        if ((ast_b[n] != 1) || (ast_kind[ast_a[n]] != NODE_VARIABLE)) util_die(0, "addr(funcname)");
+        f = sym_func_find(ast_v[ast_a[n]]);
+        if (f < 0) util_die(0, "addr: unknown function");
+        emit_u8(72); emit_u8(141); emit_u8(5); emit_patch(0, sym_func_label[f]);
+        return 0;
+    }
     if (ast_v[n] == lex_name_asm) {
         a = ast_a[n];
         while (a) {
@@ -1402,7 +1444,7 @@ func x64_gen_stmt(n) {
     }
     if (t == NODE_BREAK) { x64_jmp_rel(sym_break_label[sym_nloop - 1]); return 0; }
     if (t == NODE_CONTINUE) { x64_jmp_rel(sym_cont_label[sym_nloop - 1]); return 0; }
-    if (t == NODE_RETURN) { x64_gen_expr(ast_a[n]); x64_leave_ret(); return 0; }
+    if (t == NODE_RETURN) { x64_gen_expr(ast_a[n]); if (out_naked) emit_u8(195); else x64_leave_ret(); return 0; }
     x64_gen_expr(n);
     return 0;
 }
@@ -1412,8 +1454,10 @@ func x64_gen_func(n) {
     let int p = 0;
     let int k = 0;
     emit_put_label(sym_func_label[sym_func_find(ast_v[n])]);
+    out_naked = ast_c[n];
+    if (out_naked) { sym_nlocal = 0; sym_frame_off = 0; sym_frame_min = 0; x64_gen_stmt(ast_b[n]); out_naked = 0; return 0; }
     x64_prologue();
-    sym_nlocal = 0; sym_frame_off = 0;
+    sym_nlocal = 0; sym_frame_off = 0; sym_frame_min = 0;
     p = ast_a[n];
     if (p) {
         k = sym_local_add(ast_v[p], TYPE_INT);
@@ -1431,6 +1475,7 @@ func x64_gen_func(n) {
     }
     x64_gen_stmt(ast_b[n]);
     x64_leave_ret();
+    x64_patch_prologue(emit_frame_patch);
 }
 
 func x64_emit_entry() {
@@ -1449,7 +1494,7 @@ func x64_emit_entry() {
         }
     }
     x64_prologue();
-    sym_nlocal = 0; sym_frame_off = 0;
+    sym_nlocal = 0; sym_frame_off = 0; sym_frame_min = 0;
     i = ast_a[parse_root];
     while (i) {
         if ((ast_kind[i] != NODE_FUNCTION) && (ast_kind[i] != NODE_EXTERN_FUNC) && (ast_kind[i] != NODE_EXTERN_GLOB)) {
@@ -1474,6 +1519,7 @@ func x64_emit_entry() {
         if (out_freestanding) { emit_u8(235); emit_u8(254); }
         else { x64_mov_imm(SYS_EXIT); emit_u8(49); emit_u8(255); emit_u8(15); emit_u8(5); }
     }
+    x64_patch_prologue(emit_frame_patch);
     return 0;
 }
 
@@ -1599,6 +1645,10 @@ func x64_generate() {
         emit_u8(195);                             
     }
     emit_lit_label = emit_new_label();
+    if ((out_format == 1) && out_boot_mode) {
+        emit_u8(199); emit_u8(4); emit_u8(37); emit_u8(0); emit_u8(80); emit_u8(0); emit_u8(0);
+        emit_u32(0);
+    }
     if (out_format == 1) { emit_entry_off = emit_len; x64_emit_entry(); }
     if (out_boot_mode) { emit_print_label = emit_new_label(); emit_put_label(emit_print_label); x64_emit_print_bare(); }
     i = ast_a[parse_root];
@@ -1608,12 +1658,17 @@ func x64_generate() {
     }
     if (out_format != 1) { emit_entry_off = emit_len; x64_emit_entry(); }
     emit_put_label(emit_lit_label);
-    emit_seg_base = out_load_base + emit_hdr_size + emit_len + lex_nstr;
+    out_gpad = 0;
+    if ((out_format == 1) && out_boot_mode) out_gpad = (4096 - ((emit_len + lex_nstr) & 4095)) & 4095;
+    emit_seg_base = out_load_base + emit_hdr_size + emit_len + lex_nstr + out_gpad;
     i = 0;
     while (i < emit_npatch) {
         if (emit_patch_kind[i] == 0) emit_poke32(emit_patch_pos[i], emit_label_pos[emit_patch_value[i]] - emit_patch_pos[i] - 4);
         if (emit_patch_kind[i] == 1) emit_poke32(emit_patch_pos[i], emit_label_pos[emit_lit_label] + emit_patch_value[i] - emit_patch_pos[i] - 4);
-        if (emit_patch_kind[i] == 2) emit_poke32(emit_patch_pos[i], emit_seg_base + emit_patch_value[i] - (out_load_base + emit_hdr_size + emit_patch_pos[i] + 4));
+        if (emit_patch_kind[i] == 2) {
+            if (out_boot_mode) emit_poke32(emit_patch_pos[i], emit_seg_base + emit_patch_value[i] - (out_load_base + emit_patch_pos[i] + 4));
+            else emit_poke32(emit_patch_pos[i], emit_seg_base + emit_patch_value[i] - (out_load_base + emit_hdr_size + emit_patch_pos[i] + 4));
+        }
         i = i + 1;
     }
     i = 0;
@@ -1648,34 +1703,71 @@ func out_write_bin() {
     let int n = 0;
     let int i = 0;
     let int w = 0;
+    let int b = 0;
+    let int kern = 0;
+    let int sectors = 0;
+    let int qwords = 0;
     if (out_boot_mode) {
-        if (emit_len + lex_nstr + sym_global_size > 8192) util_die(0, "kernel image exceeds 8192 bytes");
-        out_boot_words[0]=0x8EC031FA; out_boot_words[1]=0x8EC08ED8; out_boot_words[2]=0x7C00BCD0; out_boot_words[3]=0x8E1000B8; out_boot_words[4]=0xB4DB31C0; out_boot_words[5]=0xB510B002; out_boot_words[6]=0xB602B100;
-        out_boot_words[7]=0x7213CD00; out_boot_words[8]=0x0C92E418; out_boot_words[9]=0x0F92E602; out_boot_words[10]=0x7D091601; out_boot_words[11]=0x0CC0200F; out_boot_words[12]=0xC0220F01; out_boot_words[13]=0x087C3CEA;
-        out_boot_words[14]=0xFDEBF400; out_boot_words[15]=0x000010B8; out_boot_words[16]=0x8ED88E00; out_boot_words[17]=0xBCD08EC0; out_boot_words[18]=0x00007C00; out_boot_words[19]=0x100005C7; out_boot_words[20]=0x20030000;
-        out_boot_words[21]=0x05C70000; out_boot_words[22]=0x00001004; out_boot_words[23]=0x00000000; out_boot_words[24]=0x200005C7; out_boot_words[25]=0x30030000; out_boot_words[26]=0x05C70000; out_boot_words[27]=0x00002004;
-        out_boot_words[28]=0x00000000; out_boot_words[29]=0x300005C7; out_boot_words[30]=0x00830000; out_boot_words[31]=0x05C70000; out_boot_words[32]=0x00003004; out_boot_words[33]=0x00000000; out_boot_words[34]=0x0DE0200F;
-        out_boot_words[35]=0x00000020; out_boot_words[36]=0xB8E0220F; out_boot_words[37]=0x00001000; out_boot_words[38]=0xB9D8220F; out_boot_words[39]=0xC0000080; out_boot_words[40]=0x000D320F; out_boot_words[41]=0x0F000001;
-        out_boot_words[42]=0xC0200F30; out_boot_words[43]=0x0000010D; out_boot_words[44]=0xC0220F80; out_boot_words[45]=0x007CBBEA; out_boot_words[46]=0xB8001800; out_boot_words[47]=0x00000010; out_boot_words[48]=0xC08ED88E;
-        out_boot_words[49]=0xC748D08E; out_boot_words[50]=0x080000C4; out_boot_words[51]=0x00BEFC00; out_boot_words[52]=0xBF000100; out_boot_words[53]=0x00100000; out_boot_words[54]=0x000400B9; out_boot_words[55]=0xA548F300;
-        out_boot_words[56]=0x100000B8; out_boot_words[57]=0x00E0FF00; out_boot_words[58]=0x00000000; out_boot_words[59]=0xFF000000; out_boot_words[60]=0x000000FF; out_boot_words[61]=0xFF00CF9A; out_boot_words[62]=0x000000FF;
-        out_boot_words[63]=0xFF00CF92; out_boot_words[64]=0x000000FF; out_boot_words[65]=0x3100AF9A; out_boot_words[66]=0xE7001FC0;
-        out_fd = syscall(SYS_OPEN, out_name, 577, 493);
-        if (out_fd < 0) util_die(0, "cannot create output");
+        if (emit_len + lex_nstr + out_gpad + sym_global_size > 65024) util_die(0, "kernel image exceeds 65024 bytes");
+        out_boot_words[0]=0x8EC031FA; out_boot_words[1]=0x8EC08ED8; out_boot_words[2]=0x7C00BCD0; out_boot_words[3]=0x8E1000B8;
+        out_boot_words[4]=0xBEDB31C0; out_boot_words[5]=0x42B47D0F; out_boot_words[6]=0x909013CD; out_boot_words[7]=0x72909090;
+        out_boot_words[8]=0x0C92E418; out_boot_words[9]=0x0F92E602; out_boot_words[10]=0x7D091601; out_boot_words[11]=0x0CC0200F;
+        out_boot_words[12]=0xC0220F01; out_boot_words[13]=0x087C3CEA; out_boot_words[14]=0xFDEBF400; out_boot_words[15]=0x000010B8;
+        out_boot_words[16]=0x8ED88E00; out_boot_words[17]=0xBCD08EC0; out_boot_words[18]=0x00007C00; out_boot_words[19]=0x100005C7;
+        out_boot_words[20]=0x20030000; out_boot_words[21]=0x05C70000; out_boot_words[22]=0x00001004; out_boot_words[23]=0x00000000;
+        out_boot_words[24]=0x200005C7; out_boot_words[25]=0x30030000; out_boot_words[26]=0x05C70000; out_boot_words[27]=0x00002004;
+        out_boot_words[28]=0x00000000; out_boot_words[29]=0x300005C7; out_boot_words[30]=0x00830000; out_boot_words[31]=0x05C70000;
+        out_boot_words[32]=0x00003004; out_boot_words[33]=0x00000000; out_boot_words[34]=0x0DE0200F; out_boot_words[35]=0x00000020;
+        out_boot_words[36]=0xB8E0220F; out_boot_words[37]=0x00001000; out_boot_words[38]=0xB9D8220F; out_boot_words[39]=0xC0000080;
+        out_boot_words[40]=0x000D320F; out_boot_words[41]=0x0F000009; out_boot_words[42]=0xC0200F30; out_boot_words[43]=0x0000010D;
+        out_boot_words[44]=0xC0220F80; out_boot_words[45]=0x007CBBEA; out_boot_words[46]=0xB8001800; out_boot_words[47]=0x00000010;
+        out_boot_words[48]=0xC08ED88E; out_boot_words[49]=0xC748D08E; out_boot_words[50]=0x080000C4; out_boot_words[51]=0x00BEFC00;
+        out_boot_words[52]=0xBF000100; out_boot_words[53]=0x00100000; out_boot_words[54]=0x000400B9; out_boot_words[55]=0xA548F300;
+        out_boot_words[56]=0x100000B8; out_boot_words[57]=0x00E0FF00; out_boot_words[58]=0x00000000; out_boot_words[59]=0xFF000000;
+        out_boot_words[60]=0x000000FF; out_boot_words[61]=0xFF00CF9A; out_boot_words[62]=0x000000FF; out_boot_words[63]=0xFF00CF92;
+        out_boot_words[64]=0x000000FF; out_boot_words[65]=0x3100AF9A; out_boot_words[66]=0xE7001FC0; out_boot_words[67]=0x1000007C;
+        out_boot_words[68]=0x00FFFF00; out_boot_words[69]=0x01100000; out_boot_words[70]=0x00000000;
+        kern = emit_len + lex_nstr + out_gpad + sym_global_size;
+        sectors = (kern + 511) / 512;
         i = 0;
-        while (i < emit_hdr_size) { emit_buf[i] = 0; i = i + 1; }
-        i = 0;
-        while (i < 67) {
+        while (i < 71) {
             w = out_boot_words[i];
-            emit_buf[0] = w; emit_buf[1] = w / 256; emit_buf[2] = w / 65536; emit_buf[3] = w / 16777216;
-            syscall(SYS_WRITE, out_fd, emit_buf, 4);
+            boot_sec[i * 4] = util_mod(w, 256);
+            boot_sec[i * 4 + 1] = util_mod(w / 256, 256);
+            boot_sec[i * 4 + 2] = util_mod(w / 65536, 256);
+            boot_sec[i * 4 + 3] = util_mod(w / 16777216, 256);
             i = i + 1;
         }
-        emit_buf[0] = 0x7C; emit_buf[1] = 0; emit_buf[2] = 0;
-        syscall(SYS_WRITE, out_fd, emit_buf, 3);
+        i = 284;
+        while (i < 1024) { boot_sec[i] = 0; i = i + 1; }
+        qwords = (kern + 7) / 8;
+        i = 0;
+        while (i + 9 < 287) {
+            if ((boot_sec[i] == 16) && (boot_sec[i + 1] == 0) && (boot_sec[i + 2] == 255) && (boot_sec[i + 3] == 255) && (boot_sec[i + 4] == 0) && (boot_sec[i + 5] == 0) && (boot_sec[i + 6] == 0) && (boot_sec[i + 7] == 16) && (boot_sec[i + 8] == 1)) {
+                boot_sec[i + 2] = util_mod(sectors, 256);
+                boot_sec[i + 3] = util_mod(sectors / 256, 256);
+                break;
+            }
+            i = i + 1;
+        }
+        i = 0;
+        while (i + 5 < 287) {
+            if ((boot_sec[i] == 185) && (boot_sec[i + 1] == 0) && (boot_sec[i + 2] == 4) && (boot_sec[i + 3] == 0) && (boot_sec[i + 4] == 0)) {
+                boot_sec[i + 1] = util_mod(qwords, 256);
+                boot_sec[i + 2] = util_mod(qwords / 256, 256);
+                boot_sec[i + 3] = util_mod(qwords / 65536, 256);
+                boot_sec[i + 4] = util_mod(qwords / 16777216, 256);
+                break;
+            }
+            i = i + 1;
+        }
+        emit_poke32(7, 1048576 + emit_len + lex_nstr + out_gpad);
+        out_fd = syscall(SYS_OPEN, out_name, 577, 493);
+        if (out_fd < 0) util_die(0, "cannot create output");
+        syscall(SYS_WRITE, out_fd, boot_sec, 287);
         i = 0;
         while (i < emit_hdr_size) { emit_buf[i] = 0; i = i + 1; }
-        left = 510 - 271;
+        left = 510 - 287;
         while (left > 0) {
             n = left;
             if (n > emit_hdr_size) n = emit_hdr_size;
@@ -1687,7 +1779,21 @@ func out_write_bin() {
         syscall(SYS_WRITE, out_fd, &emit_buf[emit_hdr_size], emit_len + lex_nstr);
         i = 0;
         while (i < emit_hdr_size) { emit_buf[i] = 0; i = i + 1; }
-        left = 8192 - emit_len - lex_nstr;
+        left = out_gpad;
+        while (left > 0) {
+            n = left;
+            if (n > emit_hdr_size) n = emit_hdr_size;
+            syscall(SYS_WRITE, out_fd, emit_buf, n);
+            left = left - n;
+        }
+        left = sym_global_size;
+        while (left > 0) {
+            n = left;
+            if (n > emit_hdr_size) n = emit_hdr_size;
+            syscall(SYS_WRITE, out_fd, emit_buf, n);
+            left = left - n;
+        }
+        left = sectors * 512 - kern;
         while (left > 0) {
             n = left;
             if (n > emit_hdr_size) n = emit_hdr_size;
@@ -1771,6 +1877,9 @@ func main() {
     lex_name_syscall = lex_intern("syscall");
     lex_name_const = lex_intern("const");
     lex_name_for = lex_intern("for");
+    lex_name_in = lex_intern("in");
+    lex_name_naked = lex_intern("naked");
+    lex_name_addr = lex_intern("addr");
     lex_name_argv1 = lex_intern("argv1");
     lex_name_argv2 = lex_intern("argv2");
     lex_name_base = lex_intern("base"); lex_name_entry = lex_intern("entry"); lex_name_bin = lex_intern("bin"); lex_name_elf = lex_intern("elf"); lex_name_nort = lex_intern("nort");
