@@ -13,38 +13,15 @@
 
 ```
 src/       编译器源码：main.c（C 版）、lgc.lg（自举版）
-tests/     回归用例（fac / feat / type / bits / global / maintest；multi/ 多文件用例）
-examples/  引导 demo（boot.lg @raw 引导器、hello.lg @boot 内核、kern.lg 特权指令）
+tests/     回归用例
+examples/  引导 demo
 reference/ boot.bin：gas 汇编出的权威引导扇区参照
-build/     全部编译产物（不入版本库）
-build.sh   构建 + 自举 + 回归
 ```
 
 ## 快速开始
 
 ```sh
-./build.sh                        # 构建编译器、跑三级自举、跑回归
-
-./build/my_compiler tests/fac.lg              # 生成 Linux ELF
-./build/my_compiler tests/fac.lg fac.exe      # 生成 Windows PE
-```
-
-`tests/fac.lg` 计算 `5!` 并打印：
-
-```
-func fac(n) {
-    if (n <= 1) {
-        return 1;
-    } else {
-        return n * fac(n - 1);
-    }
-}
-print fac(5);
-```
-
-```sh
-$ ./a.out
-120
+xmake run
 ```
 
 ## 语言特性
@@ -78,7 +55,7 @@ $ ./a.out
 程序可以拆到多个 `.lg` 文件。命令行里**最后一个位置参数是输出文件，其余全是源文件**（只给一个参数时输出 `a.out`）：
 
 ```sh
-./build/my_compiler tests/multi/a.lg tests/multi/b.lg out
+lgc tests/multi/a.lg tests/multi/b.lg out
 ```
 
 也可以在源码里用 `@import` 引入，路径相对当前文件所在目录；重复引入会自动跳过，循环引入安全：
@@ -99,10 +76,10 @@ func main() {
 
 ## 全局变量常驻寄存器
 
-顶层 `let` 是全局变量，默认每次读写都是 `mov rax, [rip+off]` / `mov [rip+off], rax`——一条指令一次内存访问。编译器会挑出最热的少数全局，让它们**常驻寄存器**：
+顶层 `let` 是全局变量，默认每次读写都是 `mov rax, [rip+off]` / `mov [rip+off], rax`——一条指令一次内存访问。编译器会挑出最热的少数全局，让它们常驻寄存器：
 
 ```sh
-LGC_DUMP_GREG=1 ./build/my_compiler src/lgc.lg lgc1   # 打印本次选择
+LGC_DUMP_GREG=1 lgc src/lgc.lg lgc1   # 打印本次选择
 # [greg] SRCI  -> r12 weight=256  off=1498824
 # [greg] PST   -> r13 weight=211  off=1498808
 ```
@@ -127,19 +104,16 @@ LGC_DUMP_GREG=1 ./build/my_compiler src/lgc.lg lgc1   # 打印本次选择
 ## 验证
 
 ```sh
-# Linux
-./build/my_compiler tests/fac.lg && ./a.out    # 输出 120
-
-# Windows
-./build/my_compiler tests/fac.lg fac.exe && wine fac.exe   # 输出 120
+xmake test
 ```
 
 `examples/` 下的引导 demo：
 
 ```sh
-./build/my_compiler examples/boot.lg boot.bin     # @raw 引导器
-cmp boot.bin reference/boot.bin                   # 与 gas 参照逐字节一致
+xmake run-examples
+```
 
-./build/my_compiler examples/hello.lg hello.img   # @boot 内核镜像
-qemu-system-x86_64 -drive format=raw,file=hello.img -nographic   # 输出 42 42
+## 安装到系统
+```sh
+xmake install
 ```
