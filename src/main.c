@@ -1077,7 +1077,8 @@ static void emit_apply_patches(void) {
             rel = (int64_t)emit_pcb + ((emit_len + 15) & ~15) + emit_pe_impsz + EMIT_PATCHES[i].lab - (emit_pcb + p + 4);
         else {
             int64_t hdr = 64 + 56;
-            int64_t dva = 0x400000 + hdr + emit_len;
+            int64_t gpad = (out_bin_fmt && out_boot_mode) ? ((4096 - (emit_len & 4095)) & 4095) : 0;
+            int64_t dva = 0x400000 + hdr + emit_len + gpad;
             rel = dva + EMIT_PATCHES[i].lab - (0x400000 + hdr + p + 4);
         }
         if (sz == 1) emit_buf[p] = (uint8_t)(int8_t)rel;
@@ -2316,7 +2317,11 @@ static void x64_generate(struct AST_NODE *root) {
 
     if (!out_freestanding) x64_pick_glob_regs(root);
 
-    if (out_bin_fmt) { emit_entry_off = emit_len; x64_emit_entry(root); }
+    if (out_bin_fmt) {
+        if (out_boot_mode) { EMIT(0xC7, 0x04, 0x25, 0x00, 0x50, 0x00, 0x00); emit_imm(0, 4); }
+        emit_entry_off = emit_len;
+        x64_emit_entry(root);
+    }
 
     if (out_boot_mode) {
         out_print_label = emit_new_label();
@@ -3645,7 +3650,7 @@ static const uint8_t OUT_BOOT_SEC[287] = {
     0x00, 0x00, 0x83, 0x00, 0x00, 0x00, 0xc7, 0x05, 0x04, 0x30, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x0f, 0x20, 0xe0, 0x0d, 0x20, 0x00, 0x00, 0x00,
     0x0f, 0x22, 0xe0, 0xb8, 0x00, 0x10, 0x00, 0x00, 0x0f, 0x22, 0xd8, 0xb9,
-    0x80, 0x00, 0x00, 0xc0, 0x0f, 0x32, 0x0d, 0x00, 0x01, 0x00, 0x00, 0x0f,
+    0x80, 0x00, 0x00, 0xc0, 0x0f, 0x32, 0x0d, 0x00, 0x09, 0x00, 0x00, 0x0f,
     0x30, 0x0f, 0x20, 0xc0, 0x0d, 0x01, 0x00, 0x00, 0x80, 0x0f, 0x22, 0xc0,
     0xea, 0xbb, 0x7c, 0x00, 0x00, 0x18, 0x00, 0xb8, 0x10, 0x00, 0x00, 0x00,
     0x8e, 0xd8, 0x8e, 0xc0, 0x8e, 0xd0, 0x48, 0xc7, 0xc4, 0x00, 0x00, 0x08,
@@ -3663,11 +3668,12 @@ static void out_write_bin(const char *filename) {
     if (fd < 0) { perror("open"); exit(1); }
     if (out_boot_mode) {
         static uint8_t z[65536];
-        if (emit_len + sym_gsize > 65024) {
-            fprintf(stderr, "error: kernel image exceeds 65024 bytes (%d)\n", emit_len + sym_gsize);
+        int gpad = (4096 - (emit_len & 4095)) & 4095;
+        if (emit_len + gpad + sym_gsize > 65024) {
+            fprintf(stderr, "error: kernel image exceeds 65024 bytes (%d)\n", emit_len + gpad + sym_gsize);
             exit(1);
         }
-        int kern = emit_len + sym_gsize;
+        int kern = emit_len + gpad + sym_gsize;
         int sectors = (kern + 511) / 512;
         uint8_t stage1[sizeof OUT_BOOT_SEC];
         memcpy(stage1, OUT_BOOT_SEC, sizeof OUT_BOOT_SEC);
@@ -3687,10 +3693,16 @@ static void out_write_bin(const char *filename) {
                 stage1[i + 4] = (uint8_t)((qwords >> 24) & 0xFF);
                 break;
             }
+        uint32_t ce = (uint32_t)(0x100000 + emit_len + gpad);
+        emit_buf[7] = (uint8_t)(ce & 0xFF);
+        emit_buf[8] = (uint8_t)((ce >> 8) & 0xFF);
+        emit_buf[9] = (uint8_t)((ce >> 16) & 0xFF);
+        emit_buf[10] = (uint8_t)((ce >> 24) & 0xFF);
         write(fd, stage1, sizeof stage1);
         write(fd, z, 510 - (int)sizeof OUT_BOOT_SEC);
         write(fd, "\x55\xAA", 2);
         write(fd, emit_buf, emit_len);
+        if (gpad > 0) write(fd, z, gpad);
         if (sym_gsize > 0) write(fd, z, sym_gsize);
         write(fd, z, sectors * 512 - kern);
         close(fd);
@@ -5828,7 +5840,11 @@ static void ircg_generate(struct AST_NODE *root) {
     }
     sym_global_hash_build();
     sym_func_hash_build();
-    if (out_bin_fmt) { emit_entry_off = emit_len; ircg_emit_entry(); }
+    if (out_bin_fmt) {
+        if (out_boot_mode) { EMIT(0xC7, 0x04, 0x25, 0x00, 0x50, 0x00, 0x00); emit_imm(0, 4); }
+        emit_entry_off = emit_len;
+        ircg_emit_entry();
+    }
     if (!out_freestanding) {
         out_print_label = emit_new_label(); emit_put_label(out_print_label);
         if (emit_is_pe) x64_emit_print_pe(); else x64_emit_print_elf();
