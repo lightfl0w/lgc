@@ -68,8 +68,8 @@ static unsigned lex_hash(const char *s) {
 enum TOKEN_TYPE {
     TOK_LET, TOK_PRINT, TOK_IF, TOK_ELSE, TOK_WHILE, TOK_RETURN, TOK_FUNC,
     TOK_SIZEOF, TOK_INT, TOK_CHAR, TOK_CONST, TOK_BREAK, TOK_CONTINUE, TOK_EXTERN,
-    TOK_FOR, TOK_SWITCH, TOK_CASE, TOK_DEFAULT, TOK_STRUCT, TOK_ENUM, TOK_NAKED,
-    TOK_DOT, TOK_ARROW,
+    TOK_FOR, TOK_SWITCH, TOK_CASE, TOK_DEFAULT, TOK_STRUCT, TOK_ENUM, TOK_IN, TOK_NAKED,
+    TOK_DOT, TOK_ARROW, TOK_DOTDOT,
     TOK_STR,
     TOK_IDENTIFIER, TOK_NUMBER,
     TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH,
@@ -92,7 +92,7 @@ static struct TOKEN lex_make_token(enum TOKEN_TYPE t, const char *s, int len, in
     return tk;
 }
 
-static const char *LEX_KEYWORDS[] = { "let", "print", "if", "else", "while", "return", "func", "sizeof", "int", "char", "const", "break", "continue", "extern", "for", "switch", "case", "default", "struct", "enum", "naked" };
+static const char *LEX_KEYWORDS[] = { "let", "print", "if", "else", "while", "return", "func", "sizeof", "int", "char", "const", "break", "continue", "extern", "for", "switch", "case", "default", "struct", "enum", "in", "naked" };
 
 static const uint64_t LEX_PUNCT_BIT[2] = {
     (1ULL << 33) | (1ULL << 37) | (1ULL << 38) | (1ULL << 40) | (1ULL << 41) | (1ULL << 42) | (1ULL << 43) |
@@ -197,6 +197,10 @@ static struct TOKEN lex_next_token(struct LEX_STATE *lx) {
     if (c == '-' && lx->src[s + 1] == '>') {
         lx->pos = s + 2;
         return lex_make_token(TOK_ARROW, &lx->src[s], 2, line);
+    }
+    if (c == '.' && lx->src[s + 1] == '.') {
+        lx->pos = s + 2;
+        return lex_make_token(TOK_DOTDOT, &lx->src[s], 2, line);
     }
     if (c == '.') {
         lx->pos = s + 1;
@@ -596,8 +600,9 @@ static struct AST_NODE *parse_statement(struct PARSE_STATE *p) {
         }
         case TOK_LET: {
             parse_advance(p);
+            int had_ty = 0;
             struct TYPE *ty = &TYPE_INT;
-            if (p->cur.type == TOK_INT || p->cur.type == TOK_CHAR || p->cur.type == TOK_STRUCT) ty = parse_type(p);
+            if (p->cur.type == TOK_INT || p->cur.type == TOK_CHAR || p->cur.type == TOK_STRUCT) { ty = parse_type(p); had_ty = 1; }
             if (p->cur.type != TOK_IDENTIFIER) die("expected var name", p->cur.line);
             struct AST_NODE *n = ast_new(NODE_LET, t.line);
             n->data.let.name = p->cur.text;
@@ -614,6 +619,7 @@ static struct AST_NODE *parse_statement(struct PARSE_STATE *p) {
             if (p->cur.type == TOK_ASSIGN) {
                 parse_advance(p);
                 n->data.let.value = parse_expression(p);
+                if (!had_ty && n->data.let.value->type == NODE_STR) n->data.let.ty = type_pointer(&TYPE_CHAR);
             }
             parse_expect(p, TOK_SEMICOLON, "expected ';'");
             return n;
@@ -650,6 +656,34 @@ static struct AST_NODE *parse_statement(struct PARSE_STATE *p) {
         }
         case TOK_FOR: {
             parse_advance(p);
+            if (p->cur.type == TOK_IDENTIFIER && p->pos < p->count && p->tokens[p->pos].type == TOK_IN) {
+                struct TOKEN rv = p->cur;
+                parse_advance(p);
+                parse_advance(p);
+                struct AST_NODE *lo = parse_expression(p);
+                parse_expect(p, TOK_DOTDOT, "expected '..'");
+                struct AST_NODE *hi = parse_expression(p);
+                struct AST_NODE *rn = ast_new(NODE_FOR, t.line);
+                struct AST_NODE *l1 = ast_new(NODE_LET, t.line);
+                l1->data.let.name = rv.text;
+                l1->data.let.ty = &TYPE_INT;
+                l1->data.let.value = lo;
+                rn->data.for_node.init = l1;
+                struct AST_NODE *iv = ast_new(NODE_VARIABLE, t.line);
+                iv->data.variable.name = rv.text;
+                rn->data.for_node.cond = ast_binary(BIN_LT, iv, hi, t.line);
+                struct AST_NODE *ov = ast_new(NODE_VARIABLE, t.line);
+                ov->data.variable.name = rv.text;
+                struct AST_NODE *one = ast_new(NODE_NUMBER, t.line);
+                one->data.number.value = 1;
+                struct AST_NODE *inc = ast_new(NODE_ASSIGN, t.line);
+                inc->data.assign.lhs = ov;
+                inc->data.assign.cop = BIN_ADD + 1;
+                inc->data.assign.rhs = one;
+                rn->data.for_node.inc = inc;
+                rn->data.for_node.body = parse_statement(p);
+                return rn;
+            }
             parse_expect(p, TOK_LPAREN, "expected '('");
             struct AST_NODE *n = ast_new(NODE_FOR, t.line);
             if (p->cur.type == TOK_SEMICOLON) { parse_advance(p); n->data.for_node.init = NULL; }
