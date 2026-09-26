@@ -3811,13 +3811,13 @@ static void lex_load_file(const char *path, struct TOKEN **tokens, int *tcnt, in
     }
 }
 
-enum IR_TYPE { IRTY_I1, IRTY_I8, IRTY_I64, IRTY_PTR, IRTY_VOID };
+enum IR_TYPE { IRTY_I1, IRTY_I8, IRTY_I64, IRTY_PTR, IRTY_VOID, IRTY_I32 };
 enum IR_VKIND { IRVK_CONST, IRVK_REG, IRVK_GLOBAL, IRVK_FUNC, IRVK_LIT };
 struct IR_VALUE { enum IR_VKIND k; long c; int id; const char *nm; };
 
 enum IR_OP {
     IROP_BIN, IROP_ICMP, IROP_LOAD, IROP_STORE, IROP_ALLOCA, IROP_CALL, IROP_BR, IROP_CBR, IROP_RET, IROP_PRINT, IROP_ZEXT, IROP_TRUNC, IROP_GADDR,
-    IROP_PTRADD, IROP_SYSCALL, IROP_COPY, IROP_PHI, IROP_DEAD
+    IROP_PTRADD, IROP_SYSCALL, IROP_COPY, IROP_PHI, IROP_DEAD, IROP_KERN
 };
 
 struct IR_INSN {
@@ -3830,7 +3830,7 @@ struct IR_INSN {
 };
 
 struct IR_BLOCK { int id; char nm[16]; struct IR_INSN *head, *tail; struct IR_BLOCK *next; };
-struct IR_FUNC { const char *nm; int np; char **params; int preg[16]; struct IR_BLOCK *blocks, *cur; struct IR_FUNC *next; };
+struct IR_FUNC { const char *nm; int np; char **params; int preg[16]; struct IR_BLOCK *blocks, *cur; struct IR_FUNC *next; int naked; };
 
 static struct IR_FUNC *ir_funcs;
 static int ir_nreg = 1, ir_nblk = 0;
@@ -4006,6 +4006,11 @@ static struct IR_VALUE ir_lower_addr(struct IR_FUNC *f, struct AST_NODE *n) {
         case NODE_VARIABLE: {
             struct IR_VALUE p; enum IR_TYPE ty;
             if (ir_lookup(n->data.variable.name, &p, &ty)) return p;
+            if (sym_func_find(n->data.variable.name) >= 0) {
+                struct IR_VALUE v;
+                v.k = IRVK_FUNC; v.nm = n->data.variable.name; v.c = 0; v.id = 0;
+                return v;
+            }
             return ir_gaddr(f, n->data.variable.name);
         }
         case NODE_DEREF: return ir_lower_expr(f, n->data.unary.value);
@@ -4167,6 +4172,55 @@ static struct IR_VALUE ir_lower_expr(struct IR_FUNC *f, struct AST_NODE *n) {
             if (!strcmp(nm, "addr") && sym_func_find("addr") < 0 && na == 1)
                 return ir_lower_addr(f, n->data.call.args[0]);
             if (sym_func_find(nm) < 0) {
+                static const struct { const char *nm; int sub, na; } KERN[] = {
+                    { "asm", 0, -1 }, { "cli", 1, 0 }, { "sti", 2, 0 }, { "hlt", 3, 0 },
+                    { "iretq", 4, 0 }, { "lgdt", 5, 1 }, { "lidt", 6, 1 }, { "setcr3", 7, 1 },
+                    { "inb", 8, 1 }, { "inl", 9, 1 }, { "outb", 10, 2 }, { "outl", 11, 2 }
+                };
+                for (int k = 0; k < (int)(sizeof KERN / sizeof *KERN); k++) {
+                    if (strcmp(nm, KERN[k].nm)) continue;
+                    if (KERN[k].na >= 0 && na != KERN[k].na) die("intrinsic: wrong argument count", n->line);
+                    struct IR_VALUE kargs[8];
+                    if (KERN[k].sub != 0)
+                        for (int q = 0; q < na && q < 8; q++) kargs[q] = ir_lower_expr(f, n->data.call.args[q]);
+                    struct IR_INSN *kn = ir_emit(f, IROP_KERN);
+                    kn->sub = KERN[k].sub;
+                    kn->dst = ir_nreg++; kn->ty = IRTY_I64;
+                    if (kn->sub == 0) {
+                        if (na < 1) die("asm() needs at least one byte", n->line);
+                        uint8_t *blob = malloc((size_t)na);
+                        for (int q = 0; q < na; q++) {
+                            struct AST_NODE *a = n->data.call.args[q];
+                            if (a->type != NODE_NUMBER || a->data.number.value < 0 || a->data.number.value > 255)
+                                die("asm() args must be byte constants", n->line);
+                            blob[q] = (uint8_t)a->data.number.value;
+                        }
+                        kn->nm = (const char *)blob;
+                        kn->bytes = na;
+                    } else {
+                        kn->args = na ? malloc((size_t)na * sizeof(struct IR_VALUE)) : NULL;
+                        kn->nargs = na;
+                        for (int q = 0; q < na && q < 8; q++) kn->args[q] = kargs[q];
+                    }
+                    return ir_reg(kn->dst);
+                }
+                if (!strcmp(nm, "ld32") && na == 1) {
+                    struct IR_VALUE v = ir_lower_expr(f, n->data.call.args[0]);
+                    struct IR_INSN *in = ir_emit(f, IROP_LOAD);
+                    in->ty = IRTY_I32; in->dst = ir_nreg++;
+                    in->a = v;
+                    return ir_reg(in->dst);
+                }
+                if (!strcmp(nm, "st32") && na == 2) {
+                    struct IR_VALUE v = ir_lower_expr(f, n->data.call.args[1]);
+                    struct IR_VALUE p = ir_lower_expr(f, n->data.call.args[0]);
+                    struct IR_INSN *in = ir_emit(f, IROP_STORE);
+                    in->ty = IRTY_I32;
+                    in->a = v; in->b = p;
+                    struct IR_INSN *cp = ir_emit(f, IROP_COPY);
+                    cp->ty = IRTY_I64; cp->dst = ir_nreg++; cp->a = v;
+                    return ir_reg(cp->dst);
+                }
                 die("call to undefined function (IR backend)", n->line);
             }
             struct IR_VALUE args[64];
@@ -4335,7 +4389,7 @@ static const char *ir_cmp_name(int sub) {
     return nm[sub];
 }
 static const char *ir_ty_name(enum IR_TYPE ty) {
-    static const char *nm[] = { "i1", "i8", "i64", "ptr", "void" };
+    static const char *nm[] = { "i1", "i8", "i64", "ptr", "void", "i32" };
     return nm[ty];
 }
 static void ir_print_v(struct IR_VALUE v) {
@@ -4376,6 +4430,7 @@ static void ir_print_fn(struct IR_FUNC *f) {
                     case IROP_GADDR: printf("%%v%d = global.addr @%s", in->dst, in->nm); break;
                     case IROP_PTRADD: printf("%%v%d = ptradd ", in->dst); ir_print_v(in->a); printf(", "); ir_print_v(in->b); break;
                     case IROP_SYSCALL: printf("%%v%d = syscall(", in->dst); for (int k = 0; k < in->nargs; k++) { if (k) printf(", "); ir_print_v(in->args[k]); } printf(")"); break;
+                    case IROP_KERN: printf("%%v%d = kern<%d>", in->dst, in->sub); break;
                     case IROP_COPY: printf("%%v%d = copy ", in->dst); ir_print_v(in->a); break;
                     case IROP_PHI:
                         printf("%%v%d = phi i64 [ ", in->dst);
@@ -4416,10 +4471,12 @@ static void ir_print(void) {
 
 static void ir_lower_function(struct AST_NODE *n) {
     struct IR_FUNC *f = ir_newfunc(n->data.function.name, n->data.function.pcount, n->data.function.params);
+    f->naked = n->data.function.naked;
     struct IR_BLOCK *emit_entry_off = ir_newblock(f, "entry");
     f->cur = emit_entry_off;
     ir_symn = 0;
     for (int i = 0; i < n->data.function.pcount; i++) {
+        if (f->naked) continue;
         struct IR_VALUE param = ir_reg(ir_nreg++);
         struct IR_VALUE p = ir_alloca(f, IRTY_I64, 8);
         ir_store(f, IRTY_I64, param, p);
@@ -4520,7 +4577,11 @@ static void ir_split_edges(struct IR_FUNC *f) {
         if (ir_cfg_nsucc[i] != 2) continue;
         for (int j = 0; j < 2; j++) {
             int t = ir_cfg_succ[i][j];
-            if (ir_cfg_npred[t] > 1 && ns < 512) { spl[ns].in = ir_cfg_blocks[i]->tail; spl[ns].t = t; ns++; }
+            if (ir_cfg_npred[t] > 1 && ns < 512) {
+                spl[ns].in = ir_cfg_blocks[i]->tail;
+                spl[ns].t = ir_cfg_blocks[t]->id;
+                ns++;
+            }
         }
     }
     for (int k = 0; k < ns; k++) {
@@ -4879,6 +4940,8 @@ static void ir_ssa_gvn(struct IR_FUNC *f) {
     int nt = 0;
     struct { int reg; struct IR_VALUE to; } reps[8192];
     int nr = 0;
+    ir_cfg(f);
+    ir_dominators();
     int comm[11] = { 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0 };
 
     void enter(int bi, int depth) {
@@ -4930,7 +4993,7 @@ static void ir_ssa_dce(struct IR_FUNC *f) {
     for (struct IR_BLOCK *b = f->blocks; b; b = b->next)
         for (struct IR_INSN *in = b->head; in; in = in->next)
             if (in->op == IROP_STORE || in->op == IROP_CALL || in->op == IROP_PRINT || in->op == IROP_SYSCALL ||
-                in->op == IROP_RET || in->op == IROP_BR || in->op == IROP_CBR || in->op == IROP_ALLOCA)
+                in->op == IROP_RET || in->op == IROP_BR || in->op == IROP_CBR || in->op == IROP_ALLOCA || in->op == IROP_KERN)
                 IRMARK(in);
     while (wsp) {
         struct IR_INSN *in = wl[--wsp];
@@ -4942,7 +5005,7 @@ static void ir_ssa_dce(struct IR_FUNC *f) {
     for (struct IR_BLOCK *b = f->blocks; b; b = b->next)
         for (struct IR_INSN *in = b->head; in; in = in->next)
             if (!in->mk && in->op != IROP_STORE && in->op != IROP_CALL && in->op != IROP_PRINT && in->op != IROP_SYSCALL &&
-                in->op != IROP_RET && in->op != IROP_BR && in->op != IROP_CBR && in->op != IROP_ALLOCA)
+                in->op != IROP_RET && in->op != IROP_BR && in->op != IROP_CBR && in->op != IROP_ALLOCA && in->op != IROP_KERN)
                 in->op = IROP_DEAD;
     ir_unlink_dead(f);
 }
@@ -5269,6 +5332,12 @@ static void ircg_mov_ri(int dst, long long v) {
 static void ircg_load_to(int r, struct IR_VALUE v, struct IR_ALLOC *al) {
     if (v.k == IRVK_CONST) { ircg_mov_ri(r, v.c); return; }
     if (v.k == IRVK_LIT) { ircg_lea_rip(r, (int)v.c, 1); return; }
+    if (v.k == IRVK_FUNC) {
+        int fi = sym_func_find(v.nm);
+        if (fi < 0) die("addr: unknown function", 0);
+        ircg_lea_rip(r, SYM_FUNCS[fi].lab, 0);
+        return;
+    }
     if (v.id >= 0 && v.id < al->nreg && al->reg[v.id] >= 0) { ircg_mov_rr(r, al->reg[v.id]); return; }
     ircg_mov_rm(r, al->slot[v.id]);
 }
@@ -5332,7 +5401,16 @@ static void ircg_emit_func(struct IR_FUNC *f, int is_entry) {
     for (struct IR_BLOCK *b = f->blocks; b; b = b->next) blab[nb++] = emit_new_label();
     int epilab = emit_new_label();
 
-    ircg_prologue(&al, is_entry, f);
+    if (f->naked) {
+        for (struct IR_BLOCK *b = f->blocks; b; b = b->next)
+            for (struct IR_INSN *in = b->head; in; in = in->next)
+                if (in->op == IROP_ALLOCA) die("naked function cannot use a stack frame", 0);
+        if (al.slot)
+            for (int i = 0; i < al.nreg; i++)
+                if (al.slot[i] < 0) { fprintf(stderr, "dbg: naked spill in %s\n", f->nm); die("naked function cannot spill", 0); }
+    } else {
+        ircg_prologue(&al, is_entry, f);
+    }
 
     int bi = 0;
     for (struct IR_BLOCK *b = f->blocks; b; b = b->next, bi++) {
@@ -5403,6 +5481,8 @@ static void ircg_emit_func(struct IR_FUNC *f, int is_entry) {
                     int rd = (in->dst >= 0 && al.reg[in->dst] >= 0) ? al.reg[in->dst] : 0;
                     if (in->ty == IRTY_I8)
                         EMIT((uint8_t)(0x48 | (((rd >> 3) & 1) << 2)), 0x0F, 0xB6, (uint8_t)((rd << 3) & 0x38));
+                    else if (in->ty == IRTY_I32)
+                        EMIT((uint8_t)(0x40 | (((rd >> 3) & 1) << 2)), 0x8B, (uint8_t)((rd << 3) & 0x38));
                     else
                         EMIT((uint8_t)(0x48 | (((rd >> 3) & 1) << 2)), 0x8B, (uint8_t)((rd << 3) & 0x38));
                     ircg_store_from(rd, in->dst, &al);
@@ -5412,6 +5492,7 @@ static void ircg_emit_func(struct IR_FUNC *f, int is_entry) {
                     ircg_load_to(0, in->a, &al);
                     ircg_load_to(1, in->b, &al);
                     if (in->ty == IRTY_I8) EMIT(0x88, 0x01);
+                    else if (in->ty == IRTY_I32) EMIT(0x89, 0x01);
                     else EMIT(0x48, 0x89, 0x01);
                     break;
                 }
@@ -5471,10 +5552,46 @@ static void ircg_emit_func(struct IR_FUNC *f, int is_entry) {
                     break;
                 }
                 case IROP_PRINT: {
-                    if (out_freestanding) die("print is unavailable in freestanding mode", 0);
+                    if (out_freestanding && !out_boot_mode) die("print is unavailable in freestanding mode", 0);
                     ircg_load_to(0, in->a, &al);
                     EMIT(0xE8);
                     emit_patch(0, in->sub ? out_print_str_label : out_print_label);
+                    break;
+                }
+                case IROP_KERN: {
+                    switch (in->sub) {
+                    case 0: {
+                        const uint8_t *blob = (const uint8_t *)in->nm;
+                        for (long k = 0; k < in->bytes; k++) EMIT(blob[k]);
+                        EMIT(0x31, 0xC0);
+                        break;
+                    }
+                    case 1: EMIT(0xFA); break;
+                    case 2: EMIT(0xFB); break;
+                    case 3: EMIT(0xF4); break;
+                    case 4: EMIT(0x48, 0xCF); break;
+                    case 5: case 6: case 7:
+                        ircg_load_to(0, in->args[0], &al);
+                        if (in->sub == 5) EMIT(0x0F, 0x01, 0x10);
+                        else if (in->sub == 6) EMIT(0x0F, 0x01, 0x18);
+                        else EMIT(0x0F, 0x22, 0xD8);
+                        break;
+                    case 8: case 9:
+                        ircg_load_to(0, in->args[0], &al);
+                        EMIT(0x66, 0x89, 0xC2);
+                        if (in->sub == 9) EMIT(0xED);
+                        else { EMIT(0xEC); EMIT(0x0F, 0xB6, 0xC0); }
+                        break;
+                    case 10: case 11:
+                        ircg_load_to(0, in->args[1], &al);
+                        EMIT(0x50);
+                        ircg_load_to(0, in->args[0], &al);
+                        EMIT(0x66, 0x89, 0xC2);
+                        EMIT(0x58);
+                        EMIT(in->sub == 11 ? 0xEF : 0xEE);
+                        break;
+                    }
+                    ircg_store_from(0, in->dst, &al);
                     break;
                 }
                 case IROP_BR: {
@@ -5511,7 +5628,8 @@ static void ircg_emit_func(struct IR_FUNC *f, int is_entry) {
     }
     if (!is_entry) {
         emit_put_label(epilab);
-        ircg_epilogue(&al);
+        if (f->naked) EMIT(0xC3);
+        else ircg_epilogue(&al);
     }
     ircg_free_alloc(&al);
 }
@@ -5557,7 +5675,7 @@ static void ircg_emit_entry(void) {
 
 static void ircg_generate(struct AST_NODE *root) {
     out_bin_fmt = (out_format == FMT_BIN);
-    if (out_bin_fmt) die("IR backend requires ELF or PE output", 0);
+    if (out_bin_fmt && out_raw_mode) die("IR backend does not support @raw output", 0);
     emit_len = 0;
     sym_nglobal = 0; sym_gsize = 0;
     for (int i = 0; i < root->data.block.count; i++) {
@@ -5577,11 +5695,17 @@ static void ircg_generate(struct AST_NODE *root) {
     }
     sym_global_hash_build();
     sym_func_hash_build();
+    if (out_bin_fmt) { emit_entry_off = emit_len; ircg_emit_entry(); }
     if (!out_freestanding) {
         out_print_label = emit_new_label(); emit_put_label(out_print_label);
         if (emit_is_pe) x64_emit_print_pe(); else x64_emit_print_elf();
         out_print_str_label = emit_new_label(); emit_put_label(out_print_str_label);
         if (emit_is_pe) x64_emit_print_str_pe(); else x64_emit_print_str_elf();
+    } else if (out_bin_fmt && out_boot_mode) {
+        out_print_label = emit_new_label(); emit_put_label(out_print_label);
+        x64_emit_print_bare();
+        out_print_str_label = emit_new_label(); emit_put_label(out_print_str_label);
+        x64_emit_print_str_bare();
     }
     emit_lit_label = emit_new_label();
     for (int i = 0; i < root->data.block.count; i++) {
@@ -5594,7 +5718,7 @@ static void ircg_generate(struct AST_NODE *root) {
         ircg_emit_func(ff, 0);
     }
     emit_entry_off = emit_len;
-    ircg_emit_entry();
+    if (!out_bin_fmt) ircg_emit_entry();
     emit_put_label(emit_lit_label);
     if (parse_nlit) { memcpy(emit_buf + emit_len, PARSE_LITS, parse_nlit); emit_len += parse_nlit; }
     emit_shrink_relayout();
@@ -5691,15 +5815,18 @@ int main(int argc, char **argv) {
     }
     if (cli_backend >= 1) {
         char out2[512];
-        if (out_format == FMT_BIN) die("IR backend requires ELF or PE output", 0);
+        if (out_format == FMT_BIN && out_raw_mode) die("IR backend does not support @raw output", 0);
         ir_pipeline(root);
         ircg_generate(root);
         if (cli_backend == 2) {
             snprintf(out2, sizeof out2, "%s.ssa", out);
-            if (emit_is_pe) out_write_pe(out2); else out_write_elf(out2);
+            if (emit_is_pe) out_write_pe(out2);
+            else if (out_format == FMT_BIN) out_write_bin(out2);
+            else out_write_elf(out2);
             printf("Generated %s (SSA IR backend)\n", out2);
         } else {
-            if (emit_is_pe) out_write_pe(out); else out_write_elf(out);
+            if (out_format == FMT_BIN) out_write_bin(out);
+            else if (emit_is_pe) out_write_pe(out); else out_write_elf(out);
         }
     } else if (cli_backend == 0) {
         x64_generate(root);
