@@ -1481,7 +1481,7 @@ static void x64_gen_addr(struct AST_NODE *n) {
             break;
         case NODE_INDEX: {
             struct TYPE *bt = type_of_expr(n->data.index.base);
-            if (bt->kind == 1) x64_gen_expr(n->data.index.base);
+            if (bt->kind == 1 || n->data.index.base->type == NODE_BINARY) x64_gen_expr(n->data.index.base);
             else x64_gen_addr(n->data.index.base);
             EMIT(0x50);
             x64_gen_expr(n->data.index.index);
@@ -4077,7 +4077,7 @@ static struct IR_VALUE ir_lower_addr(struct IR_FUNC *f, struct AST_NODE *n) {
         case NODE_DEREF: return ir_lower_expr(f, n->data.unary.value);
         case NODE_INDEX: {
             struct TYPE *bt = ir_expr_ty(n->data.index.base);
-            struct IR_VALUE base = bt->kind == 1 ? ir_lower_expr(f, n->data.index.base) : ir_lower_addr(f, n->data.index.base);
+            struct IR_VALUE base = bt->kind == 1 || n->data.index.base->type == NODE_BINARY ? ir_lower_expr(f, n->data.index.base) : ir_lower_addr(f, n->data.index.base);
             struct IR_VALUE iv = ir_lower_expr(f, n->data.index.index);
             int es = type_size(ir_expr_ty(n));
             if (es != 1 && es != 8) iv = ir_bin(f, IRBIN_MUL, iv, ir_const(es));
