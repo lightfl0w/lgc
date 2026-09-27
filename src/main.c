@@ -3940,7 +3940,12 @@ static struct IR_VALUE ir_alloca(struct IR_FUNC *f, enum IR_TYPE ty, long bytes)
     return ir_reg(in->dst);
 }
 static struct IR_VALUE ir_ptradd(struct IR_FUNC *f, struct IR_VALUE a, struct IR_VALUE b) {
+    struct IR_INSN *d = f->cur->tail;
     struct IR_INSN *in = ir_emit(f, IROP_PTRADD); in->ty = IRTY_PTR; in->dst = ir_nreg++; in->a = a; in->b = b;
+    if (b.k == IRVK_REG && d && d->op == IROP_BIN && d->dst == b.id) {
+        if (d->sub == IRBIN_SHL && d->b.k == IRVK_CONST && d->b.c == 3) { in->b = d->a; in->sub = 8; }
+        else if (d->sub == IRBIN_MUL && d->b.k == IRVK_CONST && (d->b.c == 1 || d->b.c == 2 || d->b.c == 4 || d->b.c == 8)) { in->b = d->a; in->sub = (int)d->b.c; }
+    }
     return ir_reg(in->dst);
 }
 static struct IR_VALUE ir_load(struct IR_FUNC *f, enum IR_TYPE ty, struct IR_VALUE p) {
@@ -5687,11 +5692,33 @@ static void ircg_emit_func(struct IR_FUNC *f, int is_entry) {
                 }
                 case IROP_PTRADD: {
                     int rd = (in->dst >= 0 && al.reg[in->dst] >= 0) ? al.reg[in->dst] : -1;
-                    int rb = ircg_val_reg(in->b, &al);
-                    int acc = (rd >= 0 && rb != rd) ? rd : 0;
-                    ircg_load_to(acc, in->a, &al);
-                    ircg_arith(0, acc, in->b, rb, &al);
-                    ircg_store_from(acc, in->dst, &al);
+                    int rb = (in->a.k == IRVK_REG && in->a.id >= 0 && in->a.id < al.nreg) ? al.reg[in->a.id] : -1;
+                    int ri = (in->b.k == IRVK_REG && in->b.id >= 0 && in->b.id < al.nreg) ? al.reg[in->b.id] : -1;
+                    int sc = in->sub ? in->sub : 1;
+                    if (rb >= 0 && ri >= 0 && ri != 4) {
+                        int t = rd >= 0 ? rd : 0;
+                        uint8_t lrex = (uint8_t)(0x48 | (t >= 8 ? 4 : 0) | (ri >= 8 ? 2 : 0) | (rb >= 8 ? 1 : 0));
+                        uint8_t lsib = (uint8_t)((sc == 2 ? 0x40 : sc == 4 ? 0x80 : sc == 8 ? 0xC0 : 0x00) | ((ri & 7) << 3) | (rb & 7));
+                        if ((rb & 7) == 5) EMIT(lrex, 0x8D, (uint8_t)(0x40 | ((t & 7) << 3) | 4), lsib, 0x00);
+                        else EMIT(lrex, 0x8D, (uint8_t)(((t & 7) << 3) | 4), lsib);
+                        ircg_map_kill(t);
+                        if (rd < 0) ircg_store_from(t, in->dst, &al);
+                        ircg_flag_cc = -1; ircg_flag_id = -1;
+                        break;
+                    }
+                    if (sc != 1) {
+                        ircg_load_to(0, in->b, &al);
+                        ircg_map_kill(0);
+                        EMIT(0x48, 0xC1, 0xE0, (uint8_t)(sc == 2 ? 1 : sc == 4 ? 2 : 3));
+                        ircg_arith(0, 0, in->a, ircg_val_reg(in->a, &al), &al);
+                        ircg_store_from(0, in->dst, &al);
+                    } else {
+                        rb = ircg_val_reg(in->b, &al);
+                        int acc = (rd >= 0 && rb != rd) ? rd : 0;
+                        ircg_load_to(acc, in->a, &al);
+                        ircg_arith(0, acc, in->b, rb, &al);
+                        ircg_store_from(acc, in->dst, &al);
+                    }
                     ircg_flag_cc = -1; ircg_flag_id = -1;
                     break;
                 }
