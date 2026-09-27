@@ -5073,6 +5073,37 @@ static void ir_ssa_dce(struct IR_FUNC *f) {
     ir_unlink_dead(f);
 }
 
+static void ir_ssa_trivphi(struct IR_FUNC *f) {
+    int changed = 1;
+    while (changed) {
+        changed = 0;
+        for (struct IR_BLOCK *b = f->blocks; b; b = b->next) {
+            if (!b->head || b->head->op != IROP_PHI) continue;
+            for (struct IR_INSN *in = b->head; in && in->op == IROP_PHI; in = in->next) {
+                struct IR_VALUE v;
+                int nv = 0, ok = 1;
+                for (int e = 0; e < in->nargs && ok; e++) {
+                    struct IR_VALUE a = in->args[e];
+                    if (a.k == IRVK_REG && a.id == in->dst) continue;
+                    if (nv == 0) { v = a; nv = 1; }
+                    else if (a.k != v.k || a.c != v.c || a.id != v.id || a.nm != v.nm) ok = 0;
+                }
+                if (!ok || nv != 1) continue;
+                for (struct IR_BLOCK *b2 = f->blocks; b2; b2 = b2->next)
+                    for (struct IR_INSN *i2 = b2->head; i2; i2 = i2->next) {
+                        if (i2->a.k == IRVK_REG && i2->a.id == in->dst) i2->a = v;
+                        if (i2->b.k == IRVK_REG && i2->b.id == in->dst) i2->b = v;
+                        for (int k = 0; k < i2->nargs; k++)
+                            if (i2->args[k].k == IRVK_REG && i2->args[k].id == in->dst) i2->args[k] = v;
+                    }
+                in->op = IROP_DEAD;
+                changed = 1;
+            }
+        }
+    }
+    ir_unlink_dead(f);
+}
+
 static void ir_out_of_ssa(struct IR_FUNC *f) {
     int any = 1;
     while (any) {
@@ -5089,7 +5120,6 @@ static void ir_out_of_ssa(struct IR_FUNC *f) {
                 for (int j = 0; j < np && !need_mk; j++)
                     for (int e = 0; e < phis[j]->nargs; e++)
                         if (phis[j]->args[e].k == IRVK_REG && phis[j]->args[e].id == phis[k]->dst) need_mk = 1;
-            need_mk = 1;
             for (int k = 0; k < np; k++) if (need_mk) phis[k]->mk = ir_nreg++;
             for (int pass = 0; pass < 2; pass++) {
                 for (int k = 0; k < np; k++) {
@@ -5131,6 +5161,8 @@ static void ir_opt_function(struct IR_FUNC *f) {
     if (dump) { printf("==== %s after fold ====\n", f->nm); ir_print_fn(f); }
     ir_ssa_gvn(f);
     if (dump) { printf("==== %s after gvn ====\n", f->nm); ir_print_fn(f); }
+    ir_ssa_trivphi(f);
+    if (dump) { printf("==== %s after trivphi ====\n", f->nm); ir_print_fn(f); }
     ir_ssa_dce(f);
     if (dump) { printf("==== %s after dce ====\n", f->nm); ir_print_fn(f); }
 }
@@ -5727,6 +5759,7 @@ static void ircg_emit_func(struct IR_FUNC *f, int is_entry) {
                 case IROP_COPY: {
                     int rd = (in->dst >= 0 && al.reg[in->dst] >= 0) ? al.reg[in->dst] : -1;
                     int ra = (in->a.k == IRVK_REG && in->a.id >= 0 && in->a.id < al.nreg) ? al.reg[in->a.id] : -1;
+                    if (rd >= 0 && rd == ra) break;
                     if (rd < 0 && ra >= 0) { ircg_mov_mr((int)al.slot[in->dst], ra); break; }
                     if (rd < 0 && in->a.k == IRVK_CONST && in->ty == IRTY_I64) {
                         EMIT(0x48, 0xC7);
