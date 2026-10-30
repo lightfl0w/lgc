@@ -1,0 +1,6 @@
+// EXPECT: use of uninitialized variable
+fn main() -> int {
+    let x: int;
+    print x;
+    return 0;
+}

@@ -12,3 +12,6 @@
 !reference/
 !reference/boot.bin
 !LICENSE
+!xmake.lua
+!tests/err/
+!tests/err/*.lg

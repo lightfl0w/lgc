@@ -1,0 +1,10 @@
+// EXPECT: inside a loop/switch
+fn main() -> int {
+    let b: own int = new int;
+    let i = 0;
+    while (i < 3) {
+        drop b;
+        i += 1;
+    }
+    return 0;
+}

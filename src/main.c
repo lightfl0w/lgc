@@ -1,5 +1,6 @@
 #include <ctype.h>
 #include <fcntl.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -66,9 +67,10 @@ static unsigned lex_hash(const char *s) {
 } while (0)
 
 enum TOKEN_TYPE {
-    TOK_LET, TOK_PRINT, TOK_IF, TOK_ELSE, TOK_WHILE, TOK_RETURN, TOK_FUNC,
+    TOK_LET, TOK_PRINT, TOK_IF, TOK_ELSE, TOK_WHILE, TOK_RETURN, TOK_FN,
     TOK_SIZEOF, TOK_INT, TOK_CHAR, TOK_CONST, TOK_BREAK, TOK_CONTINUE, TOK_EXTERN,
-    TOK_FOR, TOK_SWITCH, TOK_CASE, TOK_DEFAULT, TOK_STRUCT, TOK_ENUM, TOK_IN, TOK_NAKED,
+    TOK_FOR, TOK_SWITCH, TOK_CASE, TOK_DEFAULT, TOK_TYPE, TOK_ENUM, TOK_IN, TOK_NAKED,
+    TOK_OWN, TOK_NEW, TOK_DROP, TOK_IMPORT,
     TOK_DOT, TOK_ARROW, TOK_DOTDOT,
     TOK_STR,
     TOK_IDENTIFIER, TOK_NUMBER,
@@ -92,7 +94,7 @@ static struct TOKEN lex_make_token(enum TOKEN_TYPE t, const char *s, int len, in
     return tk;
 }
 
-static const char *LEX_KEYWORDS[] = { "let", "print", "if", "else", "while", "return", "func", "sizeof", "int", "char", "const", "break", "continue", "extern", "for", "switch", "case", "default", "struct", "enum", "in", "naked" };
+static const char *LEX_KEYWORDS[] = { "let", "print", "if", "else", "while", "return", "fn", "sizeof", "int", "char", "const", "break", "continue", "extern", "for", "switch", "case", "default", "type", "enum", "in", "naked", "own", "new", "drop", "import" };
 
 static const uint64_t LEX_PUNCT_BIT[2] = {
     (1ULL << 33) | (1ULL << 37) | (1ULL << 38) | (1ULL << 40) | (1ULL << 41) | (1ULL << 42) | (1ULL << 43) |
@@ -101,6 +103,8 @@ static const uint64_t LEX_PUNCT_BIT[2] = {
     (1ULL << 27) | (1ULL << 29) | (1ULL << 30) | (1ULL << 59) | (1ULL << 60) | (1ULL << 61) | (1ULL << 62) |
     (1ULL << 0),
 };
+
+#define lex_hash_cached(s, h) do { while (*s) { h ^= (unsigned char)*s++; h *= 16777619u; } } while (0)
 
 static const uint64_t LEX_PAIR_BIT[2] = {
     (1ULL << 33) | (1ULL << 37) | (1ULL << 42) | (1ULL << 43) | (1ULL << 45) |
@@ -225,7 +229,8 @@ enum NODE_KIND {
     NODE_BLOCK, NODE_IF, NODE_WHILE, NODE_RETURN, NODE_FUNCTION, NODE_CALL,
     NODE_ADDR, NODE_DEREF, NODE_INDEX, NODE_ASSIGN, NODE_SIZEOF, NODE_STR, NODE_NOT,
     NODE_BNOT, NODE_BREAK, NODE_CONTINUE, NODE_EXTERN_FUNC, NODE_EXTERN_GLOB,
-    NODE_FOR, NODE_SWITCH, NODE_CASE, NODE_MEMBER, NODE_STRUCTDEF
+    NODE_FOR, NODE_SWITCH, NODE_CASE, NODE_MEMBER, NODE_STRUCTDEF,
+    NODE_NEW, NODE_DROP, NODE_ARRAYLIT
 };
 enum BIN_OP { BIN_ADD, BIN_SUB, BIN_MUL, BIN_DIV, BIN_EQ, BIN_NE, BIN_LT, BIN_GT, BIN_LE, BIN_GE, BIN_MOD, BIN_AND, BIN_OR,
                BIN_BOR, BIN_BAND, BIN_BXOR, BIN_SHL, BIN_SHR };
@@ -246,6 +251,13 @@ static struct TYPE *type_array(int n, struct TYPE *b) {
     t[c] = (struct TYPE){ 2, n, 8, b };
     return &t[c++];
 }
+static struct TYPE *type_own(struct TYPE *b) {
+    static struct TYPE t[512]; static int c;
+    if (c >= (int)(sizeof t / sizeof *t)) die("too many types", 0);
+    t[c] = (struct TYPE){ 4, 0, 8, b };
+    return &t[c++];
+}
+static int type_is_own(struct TYPE *t) { return t && t->kind == 4; }
 static int type_size(struct TYPE *t) { return t->kind == 2 ? t->len * type_size(t->base) : t->kind == 3 ? t->len : t->sz; }
 static int type_is_char(struct TYPE *t) { return t->kind == 0 && t->sz == 1; }
 
@@ -260,11 +272,13 @@ static struct TYPE *type_record(void) {
     return &t[n++];
 }
 static struct TYPE *type_find_record(const char *name) {
-    for (int i = 0; i < type_nrecord; i++) if (!strcmp(TYPE_RECORDS[i].name, name)) return TYPE_RECORDS[i].ty;
+    size_t nl = strlen(name);
+    for (int i = 0; i < type_nrecord; i++) if (!memcmp(TYPE_RECORDS[i].name, name, nl) && !TYPE_RECORDS[i].name[nl]) return TYPE_RECORDS[i].ty;
     return NULL;
 }
 static struct TYPE_FIELD *type_find_field(struct TYPE *st, const char *f) {
-    for (int i = 0; i < st->nfield; i++) if (!strcmp(st->fields[i].name, f)) return &st->fields[i];
+    size_t fl = strlen(f);
+    for (int i = 0; i < st->nfield; i++) if (!memcmp(st->fields[i].name, f, fl) && !st->fields[i].name[fl]) return &st->fields[i];
     return NULL;
 }
 
@@ -281,19 +295,22 @@ struct AST_NODE {
         struct { struct AST_NODE *cond, *then, *else_; } if_node;
         struct { struct AST_NODE *cond, *body; } while_node;
         struct { struct AST_NODE *value; } return_node;
-        struct { char *name; char **params; struct TYPE **ptypes; int pcount; int naked; struct AST_NODE *body; } function;
+        struct { char *name; char **params; struct TYPE **ptypes; int pcount; int naked; struct TYPE *ret_ty; struct AST_NODE *body; } function;
         struct { char *name; struct AST_NODE **args; int acount; } call;
         struct { struct AST_NODE *value; } unary;
         struct { struct AST_NODE *base, *index; } index;
         struct { struct AST_NODE *lhs, *rhs; int cop; } assign;
-        struct { char *name; int pcount; } extfn;
-        struct { char *name; } extgl;
+        struct { char *name; struct TYPE **ptypes; struct TYPE *ret_ty; int pcount; } extfn;
+        struct { char *name; struct TYPE *ty; } extgl;
         struct { int off, len; } str;
         struct { struct AST_NODE *init, *cond, *inc, *body; } for_node;
         struct { struct AST_NODE *expr; struct AST_NODE **arms; int narms; } switch_node;
         struct { struct AST_NODE *base; char *field; int arrow; } member;
         struct { char *tag; struct AST_NODE *body; } structdef;
         struct { long val; int is_default; struct AST_NODE *blk; } case_arm;
+        struct { struct TYPE *ty; } new_node;
+        struct { struct AST_NODE *value; } drop_node;
+        struct { struct AST_NODE **args; int count; } arraylit;
     } data;
 };
 
@@ -392,29 +409,31 @@ static struct AST_NODE *parse_statement(struct PARSE_STATE*);
 static struct AST_NODE *parse_block(struct PARSE_STATE*);
 
 static struct TYPE *parse_type(struct PARSE_STATE *p) {
+    int own = 0;
+    if (p->cur.type == TOK_OWN) { own = 1; parse_advance(p); }
+    int nptr = 0;
+    while (p->cur.type == TOK_STAR) { nptr++; parse_advance(p); }
     struct TYPE *t;
-    if (p->cur.type == TOK_STRUCT) {
-        parse_advance(p);
-        if (p->cur.type != TOK_IDENTIFIER) die("expected struct tag", p->cur.line);
-        t = type_find_record(p->cur.text);
-        if (!t) die("undefined struct type", p->cur.line);
-        parse_advance(p);
-    } else {
-        if (p->cur.type != TOK_INT && p->cur.type != TOK_CHAR) die("expected type", p->cur.line);
+    if (p->cur.type == TOK_INT || p->cur.type == TOK_CHAR) {
         t = p->cur.type == TOK_CHAR ? &TYPE_CHAR : &TYPE_INT;
         parse_advance(p);
+    } else if (p->cur.type == TOK_IDENTIFIER) {
+        t = type_find_record(p->cur.text);
+        if (!t) die("unknown type name", p->cur.line);
+        parse_advance(p);
+    } else if (p->cur.type == TOK_LBRACKET) {
+        parse_advance(p);
+        if (p->cur.type != TOK_NUMBER) die("expected array size", p->cur.line);
+        int n = (int)lex_number(p->cur.text);
+        parse_advance(p);
+        parse_expect(p, TOK_RBRACKET, "expected ']'");
+        t = type_array(n, parse_type(p));
+    } else {
+        die("expected type", p->cur.line);
+        return NULL;
     }
-    for (;;) {
-        if (p->cur.type == TOK_STAR) { parse_advance(p); t = type_pointer(t); }
-        else if (p->cur.type == TOK_LBRACKET) {
-            parse_advance(p);
-            if (p->cur.type != TOK_NUMBER) die("expected array size", p->cur.line);
-            int n = (int)lex_number(p->cur.text);
-            parse_advance(p);
-            parse_expect(p, TOK_RBRACKET, "expected ']'");
-            t = type_array(n, t);
-        } else break;
-    }
+    for (int i = 0; i < nptr; i++) t = type_pointer(t);
+    if (own) t = type_own(t);
     return t;
 }
 
@@ -531,6 +550,12 @@ static struct AST_NODE *parse_unary(struct PARSE_STATE *p) {
         case TOK_SIZEOF:
             parse_advance(p);
             { struct AST_NODE *n = ast_new(NODE_SIZEOF, line); n->data.unary.value = parse_unary(p); return n; }
+        case TOK_NEW: {
+            parse_advance(p);
+            struct AST_NODE *n = ast_new(NODE_NEW, line);
+            n->data.new_node.ty = parse_type(p);
+            return n;
+        }
         default:
             return parse_postfix(p);
     }
@@ -568,11 +593,36 @@ static struct AST_NODE *parse_expression(struct PARSE_STATE *p) {
     return n;
 }
 
+static int parse_in_func;
+
+static int parse_is_expr_start(enum TOKEN_TYPE t) {
+    switch (t) {
+        case TOK_NUMBER: case TOK_IDENTIFIER: case TOK_STR: case TOK_LPAREN:
+        case TOK_MINUS: case TOK_AMP: case TOK_STAR: case TOK_NOT:
+        case TOK_TILDE: case TOK_SIZEOF: case TOK_NEW:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 static struct AST_NODE *parse_block(struct PARSE_STATE *p) {
     struct AST_NODE *b = ast_new(NODE_BLOCK, p->cur.line);
     parse_expect(p, TOK_LBRACE, "expected '{'");
-    while (p->cur.type != TOK_RBRACE && p->cur.type != TOK_EOF)
-        PUSH(b->data.block.stmts, b->data.block.count, b->data.block.cap, parse_statement(p));
+    while (p->cur.type != TOK_RBRACE && p->cur.type != TOK_EOF) {
+        if (!parse_is_expr_start(p->cur.type)) {
+            PUSH(b->data.block.stmts, b->data.block.count, b->data.block.cap, parse_statement(p));
+            continue;
+        }
+        int line = p->cur.line;
+        struct AST_NODE *e = parse_expression(p);
+        if (p->cur.type == TOK_SEMICOLON) { parse_advance(p); PUSH(b->data.block.stmts, b->data.block.count, b->data.block.cap, e); }
+        else if (p->cur.type == TOK_RBRACE && parse_in_func) {
+            struct AST_NODE *r = ast_new(NODE_RETURN, line);
+            r->data.return_node.value = e;
+            PUSH(b->data.block.stmts, b->data.block.count, b->data.block.cap, r);
+        } else die("expected ';'", p->cur.line);
+    }
     parse_expect(p, TOK_RBRACE, "expected '}'");
     return b;
 }
@@ -600,26 +650,29 @@ static struct AST_NODE *parse_statement(struct PARSE_STATE *p) {
         }
         case TOK_LET: {
             parse_advance(p);
-            int had_ty = 0;
-            struct TYPE *ty = &TYPE_INT;
-            if (p->cur.type == TOK_INT || p->cur.type == TOK_CHAR || p->cur.type == TOK_STRUCT) { ty = parse_type(p); had_ty = 1; }
+            struct TYPE *ty = NULL;
             if (p->cur.type != TOK_IDENTIFIER) die("expected var name", p->cur.line);
             struct AST_NODE *n = ast_new(NODE_LET, t.line);
             n->data.let.name = p->cur.text;
-            n->data.let.ty = ty;
             parse_advance(p);
-            while (p->cur.type == TOK_LBRACKET) {
-                parse_advance(p);
-                if (p->cur.type != TOK_NUMBER) die("expected array size", p->cur.line);
-                int sz = (int)lex_number(p->cur.text);
-                parse_advance(p);
-                parse_expect(p, TOK_RBRACKET, "expected ']'");
-                n->data.let.ty = type_array(sz, n->data.let.ty);
-            }
+            if (p->cur.type == TOK_COLON) { parse_advance(p); ty = parse_type(p); }
+            n->data.let.ty = ty;
             if (p->cur.type == TOK_ASSIGN) {
                 parse_advance(p);
-                n->data.let.value = parse_expression(p);
-                if (!had_ty && n->data.let.value->type == NODE_STR) n->data.let.ty = type_pointer(&TYPE_CHAR);
+                if (p->cur.type == TOK_LBRACE) {
+                    parse_advance(p);
+                    struct AST_NODE *lit = ast_new(NODE_ARRAYLIT, t.line);
+                    struct AST_NODE **args = NULL; int na = 0, acap = 0;
+                    if (p->cur.type != TOK_RBRACE)
+                        do { PUSH(args, na, acap, parse_expression(p)); }
+                        while (p->cur.type == TOK_COMMA && (parse_advance(p), 1));
+                    parse_expect(p, TOK_RBRACE, "expected '}'");
+                    lit->data.arraylit.args = args;
+                    lit->data.arraylit.count = na;
+                    n->data.let.value = lit;
+                } else {
+                    n->data.let.value = parse_expression(p);
+                }
             }
             parse_expect(p, TOK_SEMICOLON, "expected ';'");
             return n;
@@ -743,22 +796,27 @@ static struct AST_NODE *parse_statement(struct PARSE_STATE *p) {
         }
         case TOK_EXTERN: {
             parse_advance(p);
-            if (p->cur.type == TOK_FUNC) {
+            if (p->cur.type == TOK_FN) {
                 parse_advance(p);
-                if (p->cur.type != TOK_IDENTIFIER) die("expected extern func name", p->cur.line);
+                if (p->cur.type != TOK_IDENTIFIER) die("expected extern fn name", p->cur.line);
                 struct AST_NODE *n = ast_new(NODE_EXTERN_FUNC, t.line);
                 n->data.extfn.name = p->cur.text;
                 parse_advance(p);
                 parse_expect(p, TOK_LPAREN, "expected '('");
-                int pc = 0;
+                struct TYPE **pt = NULL;
+                int pc = 0, pcap = 0;
                 if (p->cur.type != TOK_RPAREN)
                     do {
                         if (p->cur.type != TOK_IDENTIFIER) die("expected param name", p->cur.line);
-                        pc++;
                         parse_advance(p);
+                        parse_expect(p, TOK_COLON, "expected ':' after param name");
+                        PUSH(pt, pc, pcap, parse_type(p));
                     } while (p->cur.type == TOK_COMMA && (parse_advance(p), 1));
                 parse_expect(p, TOK_RPAREN, "expected ')'");
                 n->data.extfn.pcount = pc;
+                n->data.extfn.ptypes = pt;
+                n->data.extfn.ret_ty = &TYPE_INT;
+                if (p->cur.type == TOK_ARROW) { parse_advance(p); n->data.extfn.ret_ty = parse_type(p); }
                 parse_expect(p, TOK_SEMICOLON, "expected ';'");
                 return n;
             }
@@ -768,25 +826,41 @@ static struct AST_NODE *parse_statement(struct PARSE_STATE *p) {
                 struct AST_NODE *n = ast_new(NODE_EXTERN_GLOB, t.line);
                 n->data.extgl.name = p->cur.text;
                 parse_advance(p);
+                parse_expect(p, TOK_COLON, "expected ':' after extern let name");
+                n->data.extgl.ty = parse_type(p);
                 parse_expect(p, TOK_SEMICOLON, "expected ';'");
                 return n;
             }
-            die("expected 'func' or 'let' after extern", t.line);
+            die("expected 'fn' or 'let' after extern", t.line);
             return NULL;
         }
-        case TOK_STRUCT: {
+        case TOK_DROP: {
             parse_advance(p);
-            if (p->cur.type != TOK_IDENTIFIER) die("expected struct tag", p->cur.line);
+            if (p->cur.type != TOK_IDENTIFIER) die("expected variable name after drop", p->cur.line);
+            struct AST_NODE *n = ast_new(NODE_DROP, t.line);
+            struct AST_NODE *v = ast_new(NODE_VARIABLE, t.line);
+            v->data.variable.name = p->cur.text;
+            n->data.drop_node.value = v;
+            parse_advance(p);
+            parse_expect(p, TOK_SEMICOLON, "expected ';'");
+            return n;
+        }
+        case TOK_TYPE: {
+            parse_advance(p);
+            if (p->cur.type != TOK_IDENTIFIER) die("expected type name", p->cur.line);
             char *tag = p->cur.text;
             parse_advance(p);
+            parse_expect(p, TOK_ASSIGN, "expected '=' in type definition");
             parse_expect(p, TOK_LBRACE, "expected '{'");
             int base = type_nfield, nf = 0, off = 0;
             while (p->cur.type != TOK_RBRACE && p->cur.type != TOK_EOF) {
-                struct TYPE *ft = parse_type(p);
                 if (p->cur.type != TOK_IDENTIFIER) die("expected field name", p->cur.line);
                 char *fn = p->cur.text;
                 parse_advance(p);
-                parse_expect(p, TOK_SEMICOLON, "expected ';' after field");
+                parse_expect(p, TOK_COLON, "expected ':' after field name");
+                struct TYPE *ft = parse_type(p);
+                if (type_is_own(ft)) die("own fields are not supported in v2", p->cur.line);
+                if (p->cur.type == TOK_COMMA || p->cur.type == TOK_SEMICOLON) parse_advance(p);
                 int fsz = type_size(ft);
                 int al = fsz >= 8 ? 8 : (fsz >= 4 ? 4 : (fsz >= 2 ? 2 : 1));
                 off = (off + al - 1) & ~(al - 1);
@@ -795,12 +869,12 @@ static struct AST_NODE *parse_statement(struct PARSE_STATE *p) {
                 off += fsz; nf++;
             }
             parse_expect(p, TOK_RBRACE, "expected '}'");
-            parse_expect(p, TOK_SEMICOLON, "expected ';' after struct");
+            parse_expect(p, TOK_SEMICOLON, "expected ';' after type definition");
             struct TYPE *st = type_record();
             st->fields = &TYPE_FIELD_POOL[base];
             st->nfield = nf;
             st->len = (off + 7) & ~7;
-            if (type_nrecord >= TYPE_RECORD_MAX) die("too many structs", t.line);
+            if (type_nrecord >= TYPE_RECORD_MAX) die("too many types", t.line);
             TYPE_RECORDS[type_nrecord].name = tag; TYPE_RECORDS[type_nrecord].ty = st; type_nrecord++;
             return ast_new(NODE_BLOCK, t.line);
         }
@@ -830,7 +904,7 @@ static struct AST_NODE *parse_statement(struct PARSE_STATE *p) {
             return ast_new(NODE_BLOCK, t.line);
         }
         case TOK_LBRACE: return parse_block(p);
-        case TOK_FUNC:   die("func must be top-level", t.line);
+        case TOK_FN:   die("fn must be top-level", t.line);
         default: {
             struct AST_NODE *e = parse_expression(p);
             parse_expect(p, TOK_SEMICOLON, "expected ';'");
@@ -842,24 +916,32 @@ static struct AST_NODE *parse_statement(struct PARSE_STATE *p) {
 static struct AST_NODE *parse_function(struct PARSE_STATE *p, int naked) {
     int line = p->cur.line;
     parse_advance(p);
-    if (p->cur.type != TOK_IDENTIFIER) die("expected func name", p->cur.line);
+    if (p->cur.type != TOK_IDENTIFIER) die("expected fn name", p->cur.line);
     struct AST_NODE *f = ast_new(NODE_FUNCTION, line);
     f->data.function.name = p->cur.text;
     f->data.function.naked = naked;
     parse_advance(p);
     parse_expect(p, TOK_LPAREN, "expected '('");
     char **params = NULL;
-    int pc = 0, pcap = 0;
+    struct TYPE **ptypes = NULL;
+    int pc = 0, pcap = 0, ptc = 0, ptcap = 0;
     if (p->cur.type != TOK_RPAREN)
         do {
             if (p->cur.type != TOK_IDENTIFIER) die("expected param name", p->cur.line);
             PUSH(params, pc, pcap, p->cur.text);
             parse_advance(p);
+            parse_expect(p, TOK_COLON, "expected ':' after param name");
+            PUSH(ptypes, ptc, ptcap, parse_type(p));
         } while (p->cur.type == TOK_COMMA && (parse_advance(p), 1));
     parse_expect(p, TOK_RPAREN, "expected ')'");
     f->data.function.params = params;
+    f->data.function.ptypes = ptypes;
     f->data.function.pcount = pc;
+    f->data.function.ret_ty = &TYPE_INT;
+    if (p->cur.type == TOK_ARROW) { parse_advance(p); f->data.function.ret_ty = parse_type(p); }
+    parse_in_func++;
     f->data.function.body = parse_block(p);
+    parse_in_func--;
     return f;
 }
 
@@ -874,6 +956,8 @@ static int out_efi_mode;
 static int out_bin_fmt;
 static int out_print_label;
 static int out_print_str_label;
+static int out_new_label;
+static int out_drop_label;
 static int out_naked;
 
 static void parse_directive(struct PARSE_STATE *p) {
@@ -907,15 +991,487 @@ static struct AST_NODE *parse_program(struct PARSE_STATE *p) {
         if (p->cur.type == TOK_AT) { parse_directive(p); continue; }
         int naked = 0;
         if (p->cur.type == TOK_NAKED) { naked = 1; parse_advance(p); }
-        if (naked && p->cur.type != TOK_FUNC) die("naked must precede func", p->cur.line);
+        if (naked && p->cur.type != TOK_FN) die("naked must precede fn", p->cur.line);
         PUSH(root->data.block.stmts, root->data.block.count, root->data.block.cap,
-             p->cur.type == TOK_FUNC ? parse_function(p, naked) : parse_statement(p));
+             p->cur.type == TOK_FN ? parse_function(p, naked) : parse_statement(p));
     }
     return root;
 }
 
-static uint8_t emit_buf[262144];
-static int emit_len, emit_entry_off, emit_is_pe, emit_pe_impsz;
+#define CHK_VAR_MAX 4096
+#define CHK_SCOPE_MAX 512
+#define CHK_GLOBAL_MAX 256
+#define CHK_FN_MAX 256
+
+struct CHK_VAR { char *name; struct TYPE *ty; signed char state; signed char borrowed; int loopdepth; };
+enum { CHK_UNINIT = 0, CHK_LIVE = 1, CHK_MOVED = 2 };
+enum { CHK_CTX_USE, CHK_CTX_MOVE, CHK_CTX_PLACE, CHK_CTX_ARG };
+
+static struct CHK_VAR CHK_VARS[CHK_VAR_MAX];
+static int chk_nvar;
+static int CHK_SCOPE[CHK_SCOPE_MAX];
+static int chk_nscope;
+static int chk_loopdepth;
+static int chk_path_dead;
+static struct TYPE *chk_ret_ty;
+static struct { char *name; struct TYPE *ty; } CHK_GLOBALS[CHK_GLOBAL_MAX];
+static int chk_nglobal;
+struct CHK_FN { char *name; struct TYPE **ptypes; struct TYPE *ret; int np; };
+static struct CHK_FN CHK_FNS[CHK_FN_MAX];
+static int chk_nfn;
+
+static void chk_die(int line, const char *fmt, ...) {
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    die(buf, line);
+}
+
+static struct CHK_VAR *chk_find(const char *nm) {
+    for (int i = chk_nvar - 1; i >= 0; i--)
+        if (!strcmp(CHK_VARS[i].name, nm)) return &CHK_VARS[i];
+    return NULL;
+}
+static struct TYPE *chk_global_find(const char *nm) {
+    for (int i = 0; i < chk_nglobal; i++)
+        if (!strcmp(CHK_GLOBALS[i].name, nm)) return CHK_GLOBALS[i].ty;
+    return NULL;
+}
+static void chk_add_global(const char *nm, struct TYPE *ty) {
+    if (chk_nglobal >= CHK_GLOBAL_MAX) die("too many globals", 0);
+    CHK_GLOBALS[chk_nglobal].name = (char *)nm;
+    CHK_GLOBALS[chk_nglobal].ty = ty;
+    chk_nglobal++;
+}
+static void chk_scope_push(void) {
+    if (chk_nscope >= CHK_SCOPE_MAX) die("scope too deep", 0);
+    CHK_SCOPE[chk_nscope++] = chk_nvar;
+}
+static void chk_scope_pop(int line) {
+    int base = CHK_SCOPE[--chk_nscope];
+    if (!chk_path_dead)
+        for (int i = base; i < chk_nvar; i++)
+            if (type_is_own(CHK_VARS[i].ty) && CHK_VARS[i].state != CHK_MOVED) {
+                if (CHK_VARS[i].state == CHK_UNINIT)
+                    chk_die(line, "own variable '%s' is declared but never initialized", CHK_VARS[i].name);
+                chk_die(line, "own value '%s' is never consumed (drop it, move it, or return it)", CHK_VARS[i].name);
+            }
+    chk_nvar = base;
+}
+static struct CHK_VAR *chk_declare(char *nm, struct TYPE *ty, int state) {
+    if (chk_nvar >= CHK_VAR_MAX) die("too many locals", 0);
+    struct CHK_VAR *v = &CHK_VARS[chk_nvar++];
+    v->name = nm; v->ty = ty; v->state = (signed char)state; v->borrowed = 0; v->loopdepth = chk_loopdepth;
+    return v;
+}
+
+static struct TYPE *chk_expr(struct AST_NODE *n, int ctx);
+static void chk_stmt(struct AST_NODE *n);
+static int x64_reg_index(const char *n);
+
+static void chk_consume(struct CHK_VAR *v, int line) {
+    if (v->state == CHK_UNINIT) chk_die(line, "use of uninitialized value '%s'", v->name);
+    if (v->state == CHK_MOVED) chk_die(line, "use of moved value '%s'", v->name);
+    if (v->borrowed) chk_die(line, "cannot consume '%s' while it is borrowed", v->name);
+    if (v->loopdepth < chk_loopdepth)
+        chk_die(line, "cannot consume '%s' inside a loop/switch: it would run more than once", v->name);
+    v->state = CHK_MOVED;
+}
+
+static struct TYPE *chk_member_ty(struct AST_NODE *base, int arrow, int line) {
+    struct TYPE *bt = chk_expr(base, CHK_CTX_PLACE);
+    if (bt->kind == 4) { bt = bt->base; if (bt->kind == 1) { bt = bt->base; arrow = 0; } }
+    if (arrow) {
+        if (bt->kind != 1) chk_die(line, "-> applied to non-pointer");
+        bt = bt->base;
+    }
+    if (!bt || bt->kind != 3) chk_die(line, "member access on non-struct");
+    return bt;
+}
+
+static struct TYPE *chk_expr(struct AST_NODE *n, int ctx) {
+    if (!n) return &TYPE_INT;
+    switch (n->type) {
+        case NODE_NUMBER: return &TYPE_INT;
+        case NODE_STR:    return type_pointer(&TYPE_CHAR);
+        case NODE_NEW:    return type_own(n->data.new_node.ty);
+        case NODE_VARIABLE: {
+            struct CHK_VAR *v = chk_find(n->data.variable.name);
+            if (!v) {
+                struct TYPE *gt = chk_global_find(n->data.variable.name);
+                if (!gt && x64_reg_index(n->data.variable.name) >= 0) return &TYPE_INT; 
+                if (!gt) chk_die(n->line, "undefined variable '%s'", n->data.variable.name);
+                return gt;
+            }
+            if (v->state == CHK_UNINIT) chk_die(n->line, "use of uninitialized variable '%s'", v->name);
+            if (v->state == CHK_MOVED) chk_die(n->line, "use of moved value '%s'", v->name);
+            if (type_is_own(v->ty)) {
+                if (ctx == CHK_CTX_MOVE) { chk_consume(v, n->line); return v->ty; }
+                if (ctx == CHK_CTX_PLACE) return v->ty;
+                chk_die(n->line, "own value '%s' must be moved, borrowed (&%s) as a call argument, or dereferenced (*%s)", v->name, v->name, v->name);
+            }
+            return v->ty;
+        }
+        case NODE_ADDR: {
+            struct AST_NODE *u = n->data.unary.value;
+            if (u->type == NODE_VARIABLE) {
+                struct CHK_VAR *v = chk_find(u->data.variable.name);
+                if (v && type_is_own(v->ty)) {
+                    if (ctx != CHK_CTX_ARG)
+                        chk_die(n->line, "borrow of '%s' escapes its statement (only pass &%s directly to a call)", v->name, v->name);
+                    if (v->state != CHK_LIVE) chk_die(n->line, "cannot borrow '%s' which is not alive", v->name);
+                    v->borrowed = 1;
+                    return type_pointer(v->ty->base);
+                }
+            }
+            return type_pointer(chk_expr(u, CHK_CTX_PLACE));
+        }
+        case NODE_DEREF: {
+            struct TYPE *t = chk_expr(n->data.unary.value, CHK_CTX_PLACE);
+            if (t->kind == 4) return t->base;
+            return t->kind == 1 ? t->base : &TYPE_INT;
+        }
+        case NODE_INDEX: {
+            struct TYPE *bt = chk_expr(n->data.index.base, CHK_CTX_PLACE);
+            chk_expr(n->data.index.index, CHK_CTX_USE);
+            if (bt->kind == 4) bt = bt->base;
+            return bt->kind == 2 || bt->kind == 1 ? bt->base : &TYPE_INT;
+        }
+        case NODE_MEMBER: {
+            struct TYPE *st = chk_member_ty(n->data.member.base, n->data.member.arrow, n->line);
+            struct TYPE_FIELD *f = type_find_field(st, n->data.member.field);
+            if (!f) chk_die(n->line, "no field '%s'", n->data.member.field);
+            return f->ty;
+        }
+        case NODE_SIZEOF:
+            chk_expr(n->data.unary.value, CHK_CTX_PLACE);
+            return &TYPE_INT;
+        case NODE_NOT: case NODE_BNOT:
+            chk_expr(n->data.unary.value, CHK_CTX_USE);
+            return &TYPE_INT;
+        case NODE_BINARY:
+            chk_expr(n->data.binary.left, CHK_CTX_USE);
+            chk_expr(n->data.binary.right, CHK_CTX_USE);
+            return &TYPE_INT;
+        case NODE_ASSIGN: {
+            struct AST_NODE *lhs = n->data.assign.lhs;
+            struct TYPE *rt = NULL;
+            if (lhs->type == NODE_VARIABLE) {
+                struct CHK_VAR *v = chk_find(lhs->data.variable.name);
+                if (v && type_is_own(v->ty)) {
+                    if (n->data.assign.cop) chk_die(n->line, "compound assignment is not allowed on own values");
+                    if (v->state == CHK_LIVE)
+                        chk_die(n->line, "old value of '%s' must be dropped before assigning a new one", v->name);
+                    if (v->borrowed) chk_die(n->line, "cannot overwrite '%s' while it is borrowed", v->name);
+                    rt = chk_expr(n->data.assign.rhs, CHK_CTX_MOVE);
+                    if (!type_is_own(rt)) chk_die(n->line, "cannot assign a non-own value to own variable '%s'", v->name);
+                    v->state = CHK_LIVE;
+                    return v->ty;
+                }
+                if (v) { if (v->state == CHK_UNINIT) v->state = CHK_LIVE; }
+                chk_expr(n->data.assign.rhs, CHK_CTX_USE);
+                return v ? v->ty : &TYPE_INT;
+            }
+            chk_expr(lhs, CHK_CTX_PLACE);
+            chk_expr(n->data.assign.rhs, CHK_CTX_USE);
+            return &TYPE_INT;
+        }
+        case NODE_CALL: {
+            struct AST_NODE **args = n->data.call.args;
+            int na = n->data.call.acount;
+            struct CHK_FN *fn = NULL;
+            for (int i = 0; i < chk_nfn; i++) if (!strcmp(CHK_FNS[i].name, n->data.call.name)) { fn = &CHK_FNS[i]; break; }
+            if (!fn) {
+                for (int i = 0; i < na; i++) {
+                    struct TYPE *at = chk_expr(args[i], CHK_CTX_ARG);
+                    if (type_is_own(at)) chk_die(n->line, "cannot pass an own value to unknown function '%s'", n->data.call.name);
+                }
+                return &TYPE_INT;
+            }
+            if (na != fn->np) chk_die(n->line, "%s expects %d argument(s), got %d", fn->name, fn->np, na);
+            for (int i = 0; i < na; i++) {
+                int pc = fn->ptypes && type_is_own(fn->ptypes[i]);
+                struct TYPE *at = chk_expr(args[i], pc ? CHK_CTX_MOVE : CHK_CTX_ARG);
+                if (pc && !type_is_own(at)) chk_die(n->line, "parameter %d of %s expects an own value", i + 1, fn->name);
+                if (!pc && type_is_own(at)) chk_die(n->line, "cannot pass an own value to non-own parameter %d of %s", i + 1, fn->name);
+            }
+            return fn->ret ? fn->ret : &TYPE_INT;
+        }
+        case NODE_ARRAYLIT:
+            chk_die(n->line, "array literal is only allowed as a let initializer");
+            return &TYPE_INT;
+        default:
+            return &TYPE_INT;
+    }
+}
+
+static void chk_stmt(struct AST_NODE *n) {
+    if (!n) return;
+    if (chk_path_dead) {
+        if (n->type == NODE_LET && !n->data.let.ty) n->data.let.ty = &TYPE_INT;
+        return;
+    }
+    switch (n->type) {
+        case NODE_LET: {
+            struct TYPE *ty = n->data.let.ty;
+            struct AST_NODE *val = n->data.let.value;
+            if (!ty) {
+                if (!val) chk_die(n->line, "cannot infer type of '%s': add ': type' or an initializer", n->data.let.name);
+                ty = chk_expr(val, CHK_CTX_MOVE);
+                n->data.let.ty = ty;
+            } else if (val) {
+                if (val->type == NODE_ARRAYLIT) {
+                    if (ty->kind != 2) chk_die(n->line, "array literal needs an array type");
+                    if (ty->base->kind == 3) chk_die(n->line, "array literal of structs is not supported");
+                    if (val->data.arraylit.count > ty->len) chk_die(n->line, "too many array initializers");
+                    for (int i = 0; i < val->data.arraylit.count; i++) chk_expr(val->data.arraylit.args[i], CHK_CTX_USE);
+                } else {
+                    struct TYPE *vt = chk_expr(val, type_is_own(ty) ? CHK_CTX_MOVE : CHK_CTX_USE);
+                    if (type_is_own(ty) && !type_is_own(vt)) chk_die(n->line, "own variable '%s' needs an own initializer", n->data.let.name);
+                    if (!type_is_own(ty) && type_is_own(vt)) chk_die(n->line, "own values can only be stored in own variables, parameters or returns");
+                }
+            }
+            if (type_is_own(ty)) {
+                if (!val) chk_die(n->line, "own variable '%s' must be initialized", n->data.let.name);
+                chk_declare(n->data.let.name, ty, CHK_LIVE);
+            } else if (!val && ty->kind == 0)
+                chk_declare(n->data.let.name, ty, CHK_UNINIT);
+            else
+                chk_declare(n->data.let.name, ty, CHK_LIVE);
+            break;
+        }
+        case NODE_DROP: {
+            struct AST_NODE *v = n->data.drop_node.value;
+            struct CHK_VAR *cv = v->type == NODE_VARIABLE ? chk_find(v->data.variable.name) : NULL;
+            if (!cv) chk_die(n->line, "drop needs a local variable");
+            if (!type_is_own(cv->ty)) chk_die(n->line, "'%s' is not an own value", cv->name);
+            if (cv->state == CHK_MOVED) chk_die(n->line, "double drop of '%s'", cv->name);
+            if (cv->state == CHK_UNINIT) chk_die(n->line, "drop of uninitialized value '%s'", cv->name);
+            if (cv->borrowed) chk_die(n->line, "cannot drop '%s' while it is borrowed", cv->name);
+            if (cv->loopdepth < chk_loopdepth)
+                chk_die(n->line, "cannot drop '%s' inside a loop/switch: it would run more than once", cv->name);
+            cv->state = CHK_MOVED;
+            break;
+        }
+        case NODE_PRINT:
+            for (int i = 0; i < n->data.print.ncount; i++) chk_expr(n->data.print.args[i], CHK_CTX_USE);
+            break;
+        case NODE_BLOCK:
+            chk_scope_push();
+            for (int i = 0; i < n->data.block.count; i++) chk_stmt(n->data.block.stmts[i]);
+            chk_scope_pop(n->line);
+            break;
+        case NODE_IF: {
+            chk_expr(n->data.if_node.cond, CHK_CTX_USE);
+            int base = chk_nvar, dead0 = chk_path_dead;
+            struct CHK_VAR *snap = base ? malloc((size_t)base * sizeof *snap) : NULL;
+            if (base) memcpy(snap, CHK_VARS, (size_t)base * sizeof *snap);
+            chk_scope_push();
+            chk_stmt(n->data.if_node.then);
+            chk_scope_pop(n->data.if_node.then->line);
+            int dead_then = chk_path_dead;
+            struct CHK_VAR *after_then = base ? malloc((size_t)base * sizeof *after_then) : NULL;
+            if (base) memcpy(after_then, CHK_VARS, (size_t)base * sizeof *after_then);
+            if (base) memcpy(CHK_VARS, snap, (size_t)base * sizeof *snap);
+            chk_path_dead = dead0;
+            if (n->data.if_node.else_) {
+                chk_scope_push();
+                chk_stmt(n->data.if_node.else_);
+                chk_scope_pop(n->data.if_node.else_->line);
+            }
+            int dead_else = chk_path_dead;
+            if (dead_then && dead_else) {
+                chk_path_dead = 1;
+            } else if (dead_else) {
+                if (base) memcpy(CHK_VARS, after_then, (size_t)base * sizeof *after_then);
+                chk_path_dead = 0;
+            } else {
+                if (!dead_then) {
+                    for (int i = 0; i < base; i++) {
+                        if (CHK_VARS[i].state == after_then[i].state) continue;
+                        if (type_is_own(CHK_VARS[i].ty))
+                            chk_die(n->line, "own value '%s' is consumed on only one branch", CHK_VARS[i].name);
+                        if (CHK_VARS[i].state == CHK_UNINIT || after_then[i].state == CHK_UNINIT)
+                            chk_die(n->line, "variable '%s' may be uninitialized after this if", CHK_VARS[i].name);
+                        if (CHK_VARS[i].state == CHK_UNINIT) CHK_VARS[i].state = after_then[i].state;
+                    }
+                }
+                chk_path_dead = 0;
+            }
+            free(snap); free(after_then);
+            break;
+        }
+        case NODE_WHILE: {
+            chk_expr(n->data.while_node.cond, CHK_CTX_USE);
+            int base = chk_nvar;
+            struct CHK_VAR *snap = base ? malloc((size_t)base * sizeof *snap) : NULL;
+            if (base) memcpy(snap, CHK_VARS, (size_t)base * sizeof *snap);
+            chk_loopdepth++;
+            chk_scope_push();
+            chk_stmt(n->data.while_node.body);
+            chk_scope_pop(n->line);
+            chk_loopdepth--;
+            if (base) memcpy(CHK_VARS, snap, (size_t)base * sizeof *snap);
+            free(snap);
+            chk_path_dead = 0;
+            break;
+        }
+        case NODE_FOR: {
+            chk_scope_push();
+            chk_stmt(n->data.for_node.init);
+            chk_expr(n->data.for_node.cond, CHK_CTX_USE);
+            chk_expr(n->data.for_node.inc, CHK_CTX_USE);
+            int base = chk_nvar;
+            struct CHK_VAR *snap = base ? malloc((size_t)base * sizeof *snap) : NULL;
+            if (base) memcpy(snap, CHK_VARS, (size_t)base * sizeof *snap);
+            chk_loopdepth++;
+            chk_scope_push();
+            chk_stmt(n->data.for_node.body);
+            chk_scope_pop(n->line);
+            chk_loopdepth--;
+            if (base) memcpy(CHK_VARS, snap, (size_t)base * sizeof *snap);
+            free(snap);
+            chk_scope_pop(n->line);
+            chk_path_dead = 0;
+            break;
+        }
+        case NODE_SWITCH: {
+            chk_expr(n->data.switch_node.expr, CHK_CTX_USE);
+            int base = chk_nvar;
+            struct CHK_VAR *snap = base ? malloc((size_t)base * sizeof *snap) : NULL;
+            if (base) memcpy(snap, CHK_VARS, (size_t)base * sizeof *snap);
+            int has_default = 0;
+            chk_loopdepth++;
+            for (int i = 0; i < n->data.switch_node.narms; i++) {
+                struct AST_NODE *arm = n->data.switch_node.arms[i];
+                if (arm->data.case_arm.is_default) has_default = 1;
+                chk_scope_push();
+                chk_stmt(arm->data.case_arm.blk);
+                chk_scope_pop(arm->line);
+                if (base) memcpy(CHK_VARS, snap, (size_t)base * sizeof *snap);
+            }
+            chk_loopdepth--;
+            (void)has_default;
+            free(snap);
+            chk_path_dead = 0;
+            break;
+        }
+        case NODE_RETURN: {
+            struct AST_NODE *val = n->data.return_node.value;
+            struct TYPE *rt = chk_ret_ty;
+            struct TYPE *et = chk_expr(val, type_is_own(rt) ? CHK_CTX_MOVE : CHK_CTX_USE);
+            if (type_is_own(rt) && !type_is_own(et))
+                chk_die(n->line, "function returns an own value; return an own value or add '-> int'");
+            if (!type_is_own(rt) && type_is_own(et))
+                chk_die(n->line, "cannot return an own value from a non-own function");
+            for (int i = 0; i < chk_nvar; i++)
+                if (type_is_own(CHK_VARS[i].ty) && CHK_VARS[i].state == CHK_LIVE)
+                    chk_die(n->line, "own value '%s' leaks on this return; drop it first", CHK_VARS[i].name);
+            chk_path_dead = 1;
+            break;
+        }
+        case NODE_BREAK: case NODE_CONTINUE:
+            for (int i = 0; i < chk_nvar; i++)
+                if (type_is_own(CHK_VARS[i].ty) && CHK_VARS[i].state == CHK_LIVE && CHK_VARS[i].loopdepth >= chk_loopdepth)
+                    chk_die(n->line, "own value '%s' leaks when leaving the loop; drop it first", CHK_VARS[i].name);
+            chk_path_dead = 1;
+            break;
+        case NODE_FUNCTION: case NODE_EXTERN_FUNC: case NODE_EXTERN_GLOB:
+            break;
+        default:
+            chk_expr(n, CHK_CTX_USE);
+            break;
+    }
+    for (int i = 0; i < chk_nvar; i++) CHK_VARS[i].borrowed = 0;
+}
+
+static void chk_function(struct AST_NODE *f) {
+    chk_nvar = 0; chk_nscope = 0; chk_loopdepth = 0; chk_path_dead = 0;
+    chk_ret_ty = f->data.function.ret_ty ? f->data.function.ret_ty : &TYPE_INT;
+    chk_scope_push();
+    for (int i = 0; i < f->data.function.pcount; i++) {
+        struct TYPE *pt = f->data.function.ptypes ? f->data.function.ptypes[i] : &TYPE_INT;
+        chk_declare(f->data.function.params[i], pt, CHK_LIVE);
+    }
+    chk_stmt(f->data.function.body);
+    if (!chk_path_dead && type_is_own(chk_ret_ty))
+        chk_die(f->line, "function returns an own value; it must return on every path");
+    chk_scope_pop(f->line);
+    chk_nvar = 0; chk_nscope = 0; chk_path_dead = 0; chk_loopdepth = 0; chk_ret_ty = NULL;
+}
+
+static void chk_run(struct AST_NODE *root) {
+    chk_nglobal = 0; chk_nfn = 0; chk_nvar = 0; chk_nscope = 0; chk_path_dead = 0; chk_loopdepth = 0;
+
+    for (int i = 0; i < root->data.block.count; i++) {
+        struct AST_NODE *n = root->data.block.stmts[i];
+        if (n->type == NODE_FUNCTION) {
+            if (chk_nfn >= CHK_FN_MAX) die("too many functions", 0);
+            CHK_FNS[chk_nfn].name = n->data.function.name;
+            CHK_FNS[chk_nfn].ptypes = n->data.function.ptypes;
+            CHK_FNS[chk_nfn].ret = n->data.function.ret_ty;
+            CHK_FNS[chk_nfn].np = n->data.function.pcount;
+            chk_nfn++;
+        } else if (n->type == NODE_EXTERN_FUNC) {
+            if (chk_nfn >= CHK_FN_MAX) die("too many functions", 0);
+            CHK_FNS[chk_nfn].name = n->data.extfn.name;
+            CHK_FNS[chk_nfn].ptypes = n->data.extfn.ptypes;
+            CHK_FNS[chk_nfn].ret = n->data.extfn.ret_ty ? n->data.extfn.ret_ty : &TYPE_INT;
+            CHK_FNS[chk_nfn].np = n->data.extfn.pcount;
+            chk_nfn++;
+        }
+    }
+
+    for (int i = 0; i < root->data.block.count; i++) {
+        struct AST_NODE *n = root->data.block.stmts[i];
+        if (n->type == NODE_LET) {
+            if (n->data.let.ty && type_is_own(n->data.let.ty))
+                chk_die(n->line, "own values must be local, not global");
+            chk_add_global(n->data.let.name, n->data.let.ty ? n->data.let.ty : &TYPE_INT);
+        } else if (n->type == NODE_EXTERN_GLOB) {
+            if (n->data.extgl.ty && type_is_own(n->data.extgl.ty))
+                chk_die(n->line, "own values must be local, not global");
+            chk_add_global(n->data.extgl.name, n->data.extgl.ty ? n->data.extgl.ty : &TYPE_INT);
+        }
+    }
+    for (int i = 0; i < root->data.block.count; i++) {
+        struct AST_NODE *n = root->data.block.stmts[i];
+        if (n->type != NODE_LET) continue;
+        chk_nvar = 0; chk_nscope = 0; chk_path_dead = 0;
+        if (!n->data.let.ty) {
+            if (!n->data.let.value) chk_die(n->line, "global '%s' needs a type", n->data.let.name);
+            struct TYPE *t = chk_expr(n->data.let.value, CHK_CTX_USE);
+            if (type_is_own(t)) chk_die(n->line, "own values must be local, not global");
+            n->data.let.ty = t;
+            for (int g = 0; g < chk_nglobal; g++)
+                if (!strcmp(CHK_GLOBALS[g].name, n->data.let.name)) CHK_GLOBALS[g].ty = t;
+        } else if (n->data.let.value) {
+            if (n->data.let.value->type == NODE_ARRAYLIT) {
+                if (n->data.let.ty->kind != 2) chk_die(n->line, "array literal needs an array type");
+                if (n->data.let.value->data.arraylit.count > n->data.let.ty->len)
+                    chk_die(n->line, "too many array initializers");
+                for (int k = 0; k < n->data.let.value->data.arraylit.count; k++)
+                    chk_expr(n->data.let.value->data.arraylit.args[k], CHK_CTX_USE);
+            } else {
+                struct TYPE *vt = chk_expr(n->data.let.value, CHK_CTX_USE);
+                if (type_is_own(vt)) chk_die(n->line, "own values must be local, not global");
+            }
+        }
+    }
+    chk_nvar = 0; chk_nscope = 0; chk_path_dead = 0;
+
+    for (int i = 0; i < root->data.block.count; i++) {
+        struct AST_NODE *n = root->data.block.stmts[i];
+        if (n->type == NODE_FUNCTION) { chk_function(n); continue; }
+        if (n->type == NODE_EXTERN_FUNC || n->type == NODE_EXTERN_GLOB || n->type == NODE_LET) continue;
+        chk_stmt(n);
+    }
+    chk_nvar = 0; chk_nscope = 0; chk_path_dead = 0; chk_loopdepth = 0;
+}
+
+static uint8_t emit_buf[262144];static int emit_len, emit_entry_off, emit_is_pe, emit_pe_impsz;
 static int emit_label_pos[8192], emit_nlabel = 1;
 static struct { int pos, lab, g; } EMIT_PATCHES[8192];
 static uint8_t emit_patch_size[8192];
@@ -952,8 +1508,8 @@ static const struct { const char *name; int idx; } X64_REGS[] = {
     { "CR0", 0 }, { "CR2", 2 }, { "CR3", 3 }, { "CR4", 4 }, { "CR8", 8 }
 };
 static int x64_reg_index(const char *n) {
-    for (int i = 0; i < (int)(sizeof X64_REGS / sizeof *X64_REGS); i++)
-        if (!strcmp(X64_REGS[i].name, n)) return X64_REGS[i].idx;
+    size_t nl = strlen(n);
+    for (int i = 0; i < (int)(sizeof X64_REGS / sizeof *X64_REGS); i++) if (!memcmp(X64_REGS[i].name, n, nl) && !X64_REGS[i].name[nl]) return X64_REGS[i].idx;
     return -1;
 }
 static long x64_const_value(struct AST_NODE *a, int line) {
@@ -1432,6 +1988,7 @@ static int type_size_of_expr(struct AST_NODE *n) {
 static struct TYPE *type_of_expr(struct AST_NODE *n);
 static struct TYPE *type_struct_of(struct AST_NODE *b, int arrow) {
     struct TYPE *bt = type_of_expr(b);
+    if (bt->kind == 4) { bt = bt->base; if (bt->kind == 1) { bt = bt->base; arrow = 0; } }
     if (arrow) { if (bt->kind != 1) die("-> applied to non-pointer", b->line); bt = bt->base; }
     if (!bt || bt->kind != 3) die("member access on non-struct", b->line);
     return bt;
@@ -1446,6 +2003,7 @@ static struct TYPE *type_of_expr(struct AST_NODE *n) {
             return g ? g->ty : &TYPE_INT;
         }
         case NODE_STR:    return type_pointer(&TYPE_CHAR);
+        case NODE_NEW:    return type_own(n->data.new_node.ty);
         case NODE_DEREF:  return type_of_expr(n->data.unary.value)->kind ? type_of_expr(n->data.unary.value)->base : &TYPE_INT;
         case NODE_INDEX:  return type_of_expr(n->data.index.base)->kind ? type_of_expr(n->data.index.base)->base : &TYPE_INT;
         case NODE_ADDR:   return type_pointer(type_of_expr(n->data.unary.value));
@@ -1468,9 +2026,13 @@ static void x64_gen_addr(struct AST_NODE *n) {
     switch (n->type) {
         case NODE_VARIABLE: {
             struct SYM_LOCAL *l = sym_local_find(n->data.variable.name);
-            if (l) { EMIT(0x48, 0x8D); x64_rbp_disp(0, l->off); break; }
+            if (l) {
+                if (l->ty->kind == 4) { x64_gen_expr(n); break; } 
+                EMIT(0x48, 0x8D); x64_rbp_disp(0, l->off); break;
+            }
             struct SYM_GLOBAL *g = sym_global_find(n->data.variable.name);
             if (!g) die("undefined variable", n->line);
+            if (g->ty->kind == 4) { x64_gen_expr(n); break; }
             if (g->reg) die("cannot take address of a register-resident global", n->line);
             EMIT(0x48, 0x8D, 0x05);
             emit_patch(2, g->off);
@@ -1481,8 +2043,8 @@ static void x64_gen_addr(struct AST_NODE *n) {
             break;
         case NODE_INDEX: {
             struct TYPE *bt = type_of_expr(n->data.index.base);
-            if (bt->kind == 0 && n->data.index.base->type == NODE_VARIABLE) die("indexing non-pointer value (use 'let T* q = p')", n->line);
-            if (bt->kind == 1 || n->data.index.base->type == NODE_BINARY) x64_gen_expr(n->data.index.base);
+            if (bt->kind == 0 && n->data.index.base->type == NODE_VARIABLE) die("indexing non-pointer value (use 'let q: *int = p;')", n->line);
+            if (bt->kind == 1 || bt->kind == 4 || n->data.index.base->type == NODE_BINARY) x64_gen_expr(n->data.index.base);
             else x64_gen_addr(n->data.index.base);
             EMIT(0x50);
             x64_gen_expr(n->data.index.index);
@@ -1495,10 +2057,11 @@ static void x64_gen_addr(struct AST_NODE *n) {
         case NODE_MEMBER: {
             struct AST_NODE *b = n->data.member.base;
             int arrow = n->data.member.arrow;
+            int own = type_of_expr(b)->kind == 4;
             struct TYPE *st = type_struct_of(b, arrow);
             struct TYPE_FIELD *f = type_find_field(st, n->data.member.field);
             if (!f) die("no such field", n->line);
-            if (arrow) x64_gen_expr(b); else x64_gen_addr(b);
+            if (arrow || own) x64_gen_expr(b); else x64_gen_addr(b);
             if (f->off) {
                 if (f->off <= 127) EMIT(0x48, 0x83, 0xC0, (uint8_t)f->off);
                 else { EMIT(0x48, 0x05); emit_imm(f->off, 4); }
@@ -1587,6 +2150,13 @@ static void x64_gen_expr(struct AST_NODE *n) {
                     }
                 }
                 if (sync) x64_greg_load_rax(r);
+                break;
+            }
+            if (ty && ty->kind == 4) {
+                if (cop >= 0) die("compound assignment on own value", n->line);
+                x64_gen_expr(n->data.assign.rhs);
+                if (l) { EMIT(0x48, 0x89); x64_rbp_disp(0, l->off); }
+                else { EMIT(0x48, 0x89, 0x05); emit_patch(2, g->off); }
                 break;
             }
             if (ty && ty->kind == 0 && (cop < 0 || (!type_is_char(ty) && (cop == BIN_ADD || cop == BIN_SUB)))) {
@@ -1723,54 +2293,45 @@ static void x64_gen_expr(struct AST_NODE *n) {
             x64_emit_binop(op);
             break;
         }
+        case NODE_NEW: {
+            if (emit_is_pe || out_freestanding) die("own types require ELF userspace output", n->line);
+            EMIT(0x48, 0xC7, 0xC7); emit_imm(type_size(n->data.new_node.ty), 4);
+            EMIT(0xE8); emit_patch(0, out_new_label);
+            break;
+        }
+        case NODE_DROP: {
+            if (emit_is_pe || out_freestanding) die("own types require ELF userspace output", n->line);
+            x64_gen_expr(n->data.drop_node.value);
+            EMIT(0x48, 0x89, 0xC7);
+            EMIT(0xE8); emit_patch(0, out_drop_label);
+            break;
+        }
         case NODE_CALL: {
             const char *nm = n->data.call.name;
             int ac = n->data.call.acount;
-            if (!strcmp(nm, "asm")) {
-                for (int i = 0; i < ac; i++) {
-                    struct AST_NODE *a = n->data.call.args[i];
-                    if (a->type != NODE_NUMBER) die("asm() args must be constants", n->line);
-                    EMIT((uint8_t)a->data.number.value);
-                }
-                EMIT(0x31, 0xC0);
-                break;
-            }
-            if (!strcmp(nm, "cli"))   { EMIT(0xFA); break; }
-            if (!strcmp(nm, "sti"))   { EMIT(0xFB); break; }
-            if (!strcmp(nm, "hlt"))   { EMIT(0xF4); break; }
-            if (!strcmp(nm, "iretq")) { EMIT(0x48, 0xCF); break; }
+            int rc = -1;
+            if (!strcmp(nm, "asm")) { for (int i = 0; i < ac; i++) { struct AST_NODE *a = n->data.call.args[i]; if (a->type != NODE_NUMBER) die("asm() args must be constants", n->line); EMIT((uint8_t)a->data.number.value); } EMIT(0x31, 0xC0); break; }
+            if (!strcmp(nm, "cli")) { rc = 0xFA; goto intrin_emit; }
+            if (!strcmp(nm, "sti")) { rc = 0xFB; goto intrin_emit; }
+            if (!strcmp(nm, "hlt")) { rc = 0xF4; goto intrin_emit; }
+            if (!strcmp(nm, "iretq")) { rc = -2; goto intrin_emit; }
             if (!strcmp(nm, "lgdt") || !strcmp(nm, "lidt") || !strcmp(nm, "setcr3")) {
                 if (ac != 1) die("intrinsic needs 1 argument", n->line);
                 if (!strcmp(nm, "setcr3") && !out_bin_fmt) die("intrinsic is only available in bin output", n->line);
                 x64_gen_expr(n->data.call.args[0]);
-                if (!strcmp(nm, "lgdt")) EMIT(0x0F, 0x01, 0x10);
-                else if (!strcmp(nm, "lidt")) EMIT(0x0F, 0x01, 0x18);
-                else EMIT(0x0F, 0x22, 0xD8);
-                break;
+                rc = !strcmp(nm, "lgdt") ? 0x0F0110 : (!strcmp(nm, "lidt") ? 0x0F0118 : 0x0F22D8); goto intrin_multi;
             }
             if (!strcmp(nm, "addr") && sym_func_find(nm) < 0) {
-                if (ac != 1 || n->data.call.args[0]->type != NODE_VARIABLE)
-                    die("addr(funcname)", n->line);
+                if (ac != 1 || n->data.call.args[0]->type != NODE_VARIABLE) die("addr(funcname)", n->line);
                 int f = sym_func_find(n->data.call.args[0]->data.variable.name);
                 if (f < 0) die("addr: unknown function", n->line);
-                EMIT(0x48, 0x8D, 0x05);
-                emit_patch(0, SYM_FUNCS[f].lab);
-                break;
+                EMIT(0x48, 0x8D, 0x05); emit_patch(0, SYM_FUNCS[f].lab); break;
             }
             if (!strcmp(nm, "ld32") && sym_func_find(nm) < 0) {
-                if (ac != 1) die("ld32(addr)", n->line);
-                x64_gen_expr(n->data.call.args[0]);
-                EMIT(0x8B, 0x00);
-                break;
+                if (ac != 1) die("ld32(addr)", n->line); x64_gen_expr(n->data.call.args[0]); EMIT(0x8B, 0x00); break;
             }
             if (!strcmp(nm, "st32") && sym_func_find(nm) < 0) {
-                if (ac != 2) die("st32(addr, val)", n->line);
-                x64_gen_expr(n->data.call.args[1]);
-                EMIT(0x50);
-                x64_gen_expr(n->data.call.args[0]);
-                EMIT(0x59);
-                EMIT(0x89, 0x08);
-                break;
+                if (ac != 2) die("st32(addr, val)", n->line); x64_gen_expr(n->data.call.args[1]); EMIT(0x50); x64_gen_expr(n->data.call.args[0]); EMIT(0x59); EMIT(0x89, 0x08); break;
             }
             if (!strcmp(nm, "inb") || !strcmp(nm, "inl")) {
                 if (ac != 1) die("inb(port)", n->line);
@@ -1792,6 +2353,10 @@ static void x64_gen_expr(struct AST_NODE *n) {
                 EMIT(nm[3] == 'l' ? 0xEF : 0xEE);
                 break;
             }
+            goto raw_intrinsic;
+intrin_emit: if (rc >= 0) { EMIT(rc); break; }
+intrin_multi: if (rc == -2) { EMIT(0x48, rc); break; } EMIT((uint8_t)(rc >> 16), (uint8_t)(rc >> 8), (uint8_t)rc); break;
+raw_intrinsic:
             {
                 int ri = -1;
                 for (int k = 0; k < (int)(sizeof RAW_NAMES / sizeof *RAW_NAMES); k++)
@@ -1837,23 +2402,16 @@ static void x64_gen_expr(struct AST_NODE *n) {
                 break;
             }
         not_intrinsic:
-            if (!strcmp(nm, "syscall")) {
-                if (n->data.call.acount < 1 || n->data.call.args[0]->type != NODE_NUMBER)
-                    die("syscall(nr, a, b, c)", n->line);
+            if (nm[0] == 's' && !strcmp(nm, "syscall")) {
+                if (n->data.call.acount < 1 || n->data.call.args[0]->type != NODE_NUMBER) die("syscall(nr, a, b, c)", n->line);
                 long nr = n->data.call.args[0]->data.number.value;
                 if (emit_is_pe) {
                     if (nr != 60) die("syscall: only exit(60) on PE", n->line);
-                    x64_gen_expr(n->data.call.args[1]);
-                    EMIT(0x48, 0x89, 0xC1);
-                    emit_call_iat(2);
-                    break;
+                    x64_gen_expr(n->data.call.args[1]); EMIT(0x48, 0x89, 0xC1); emit_call_iat(2); break;
                 }
                 if (n->data.call.acount != 4) die("syscall(nr, a, b, c)", n->line);
                 for (int i = 3; i >= 1; i--) { x64_gen_expr(n->data.call.args[i]); EMIT(0x50); }
-                EMIT(0x5F, 0x5E, 0x5A);
-                x64_mov_imm(nr);
-                EMIT(0x0F, 0x05);
-                break;
+                EMIT(0x5F, 0x5E, 0x5A); x64_mov_imm(nr); EMIT(0x0F, 0x05); break;
             }
             int f = sym_func_find(n->data.call.name);
             if (f < 0) { fprintf(stderr, "error (line %d): unknown func %s\n", n->line, n->data.call.name); exit(1); }
@@ -1903,6 +2461,18 @@ static int x64_gen_cond(struct AST_NODE *c) {
 static void x64_gen_stmt(struct AST_NODE *n) {
     switch (n->type) {
         case NODE_LET: {
+            if (n->data.let.ty->kind == 2 && n->data.let.value && n->data.let.value->type == NODE_ARRAYLIT) {
+                struct SYM_LOCAL *l = sym_local_add(n->data.let.name, n->data.let.ty);
+                struct AST_NODE *lit = n->data.let.value;
+                struct TYPE *e = n->data.let.ty->base;
+                int esz = type_size(e);
+                for (int i = 0; i < lit->data.arraylit.count; i++) {
+                    x64_gen_expr(lit->data.arraylit.args[i]);
+                    if (type_is_char(e)) { EMIT(0x88); x64_rbp_disp(0, l->off + i * esz); }
+                    else { EMIT(0x48, 0x89); x64_rbp_disp(0, l->off + i * esz); }
+                }
+                break;
+            }
             if (n->data.let.value) x64_gen_expr(n->data.let.value);
             struct SYM_LOCAL *l = sym_local_add(n->data.let.name, n->data.let.ty);
             if (n->data.let.ty->kind == 2) {
@@ -1920,7 +2490,7 @@ static void x64_gen_stmt(struct AST_NODE *n) {
             } else if (n->data.let.ty->kind == 3) {
                 if (n->data.let.value) die("cannot initialize struct in place", n->line);
             } else {
-                if (!n->data.let.value) die("missing initializer", n->line);
+                if (!n->data.let.value) break; 
                 if (type_is_char(n->data.let.ty)) { EMIT(0x88); x64_rbp_disp(0, l->off); }
                 else { EMIT(0x48, 0x89); x64_rbp_disp(0, l->off); }
             }
@@ -2082,6 +2652,67 @@ static void x64_patch_prologue(int p) {
     *(int32_t *)(emit_buf + p) = need;
 }
 
+static int AST_NEW_LINE;
+static int ast_uses_new(struct AST_NODE *n) {
+    if (!n) return 0;
+    switch (n->type) {
+        case NODE_NEW: case NODE_DROP: if (!AST_NEW_LINE) AST_NEW_LINE = n->line; return 1;
+        case NODE_BINARY: return ast_uses_new(n->data.binary.left) || ast_uses_new(n->data.binary.right);
+        case NODE_LET: return ast_uses_new(n->data.let.value);
+        default: break;
+    }
+    if (n->type == NODE_BLOCK) {
+        for (int i = 0; i < n->data.block.count; i++) if (ast_uses_new(n->data.block.stmts[i])) return 1;
+        return 0;
+    }
+    if (n->type == NODE_IF) return ast_uses_new(n->data.if_node.cond) || ast_uses_new(n->data.if_node.then) || ast_uses_new(n->data.if_node.else_);
+    if (n->type == NODE_WHILE) return ast_uses_new(n->data.while_node.cond) || ast_uses_new(n->data.while_node.body);
+    if (n->type == NODE_FOR) return ast_uses_new(n->data.for_node.init) || ast_uses_new(n->data.for_node.cond) || ast_uses_new(n->data.for_node.inc) || ast_uses_new(n->data.for_node.body);
+    if (n->type == NODE_SWITCH) {
+        if (ast_uses_new(n->data.switch_node.expr)) return 1;
+        for (int i = 0; i < n->data.switch_node.narms; i++) if (ast_uses_new(n->data.switch_node.arms[i]->data.case_arm.blk)) return 1;
+        return 0;
+    }
+    if (n->type == NODE_RETURN) return ast_uses_new(n->data.return_node.value);
+    if (n->type == NODE_PRINT) { for (int i = 0; i < n->data.print.ncount; i++) if (ast_uses_new(n->data.print.args[i])) return 1; return 0; }
+    if (n->type == NODE_FUNCTION) return ast_uses_new(n->data.function.body);
+    if (n->type == NODE_CALL) { for (int i = 0; i < n->data.call.acount; i++) if (ast_uses_new(n->data.call.args[i])) return 1; return 0; }
+    if (n->type == NODE_INDEX) return ast_uses_new(n->data.index.base) || ast_uses_new(n->data.index.index);
+    if (n->type == NODE_MEMBER) return ast_uses_new(n->data.member.base);
+    if (n->type == NODE_ASSIGN) return ast_uses_new(n->data.assign.lhs) || ast_uses_new(n->data.assign.rhs);
+    if (n->type == NODE_ADDR || n->type == NODE_DEREF || n->type == NODE_NOT || n->type == NODE_BNOT || n->type == NODE_SIZEOF)
+        return ast_uses_new(n->data.unary.value);
+    if (n->type == NODE_ARRAYLIT) { for (int i = 0; i < n->data.arraylit.count; i++) if (ast_uses_new(n->data.arraylit.args[i])) return 1; return 0; }
+    return 0;
+}
+
+static void x64_emit_new_elf(void) {
+    EMIT(0x53);                              /* push rbx */
+    EMIT(0x48, 0x89, 0xFB);                  /* mov rbx, rdi */
+    EMIT(0x48, 0x89, 0xFE);                  /* mov rsi, rdi */
+    EMIT(0x48, 0x83, 0xC6, 0x10);            /* add rsi, 16 */
+    EMIT(0x31, 0xFF);                        /* xor edi, edi */
+    EMIT(0xBA, 0x03, 0x00, 0x00, 0x00);      /* mov edx, PROT_READ|PROT_WRITE */
+    EMIT(0x41, 0xBA, 0x22, 0x00, 0x00, 0x00);/* mov r10d, MAP_PRIVATE|MAP_ANONYMOUS */
+    EMIT(0x49, 0xC7, 0xC0); emit_imm(-1, 4); /* mov r8, -1 */
+    EMIT(0x45, 0x31, 0xC9);                  /* xor r9d, r9d */
+    EMIT(0xB8, 0x09, 0x00, 0x00, 0x00);      /* mov eax, SYS_mmap */
+    EMIT(0x0F, 0x05);                        /* syscall */
+    EMIT(0x48, 0x89, 0x18);                  /* mov [rax], rbx */
+    EMIT(0x48, 0x83, 0xC0, 0x10);            /* add rax, 16 */
+    EMIT(0x5B);                              /* pop rbx */
+    EMIT(0xC3);
+}
+
+static void x64_emit_drop_elf(void) {
+    EMIT(0x48, 0x83, 0xEF, 0x10);            /* sub rdi, 16 */
+    EMIT(0x48, 0x8B, 0x37);                  /* mov rsi, [rdi] */
+    EMIT(0x48, 0x83, 0xC6, 0x10);            /* add rsi, 16 */
+    EMIT(0xB8, 0x0B, 0x00, 0x00, 0x00);      /* mov eax, SYS_munmap */
+    EMIT(0x0F, 0x05);
+    EMIT(0xC3);
+}
+
 static int x64_needs_frame(struct AST_NODE *n) {
     if (!n) return 0;
     if (n->type == NODE_LET) return 1;
@@ -2120,9 +2751,13 @@ static void x64_scan_node(struct AST_NODE *n, int w) {
             } else x64_scan_node(v, w);
             break;
         }
-        case NODE_NUMBER: case NODE_STR: case NODE_SIZEOF: break;
+        case NODE_NUMBER: case NODE_STR: case NODE_SIZEOF: case NODE_NEW: break;
         case NODE_NOT: case NODE_DEREF: case NODE_BNOT:
             x64_scan_node(n->data.unary.value, w);
+            break;
+        case NODE_DROP: x64_scan_node(n->data.drop_node.value, w); break;
+        case NODE_ARRAYLIT:
+            for (int i = 0; i < n->data.arraylit.count; i++) x64_scan_node(n->data.arraylit.args[i], w);
             break;
         case NODE_BINARY:
             x64_scan_node(n->data.binary.left, w);
@@ -2224,6 +2859,21 @@ static void x64_emit_entry(struct AST_NODE *root) {
         if (n->type == NODE_LET) {
             if (!n->data.let.value) continue;
             struct SYM_GLOBAL *g = sym_global_find(n->data.let.name);
+            if (n->data.let.ty->kind == 2 && n->data.let.value->type == NODE_ARRAYLIT) {
+                struct AST_NODE *lit = n->data.let.value;
+                struct TYPE *e = n->data.let.ty->base;
+                int esz = type_size(e);
+                for (int k = 0; k < lit->data.arraylit.count; k++) {
+                    x64_gen_expr(lit->data.arraylit.args[k]);
+                    EMIT(0x50);
+                    EMIT(0x48, 0x8D, 0x1D);
+                    emit_patch(2, g->off + k * esz);
+                    EMIT(0x58);
+                    if (type_is_char(e)) EMIT(0x88, 0x03);
+                    else EMIT(0x48, 0x89, 0x03);
+                }
+                continue;
+            }
             x64_gen_expr(n->data.let.value);
             if (g && g->reg) { x64_greg_store_rax(g->reg); continue; }
             EMIT(0x50);
@@ -2286,6 +2936,13 @@ static void x64_generate(struct AST_NODE *root) {
         out_print_str_label = emit_new_label(); emit_put_label(out_print_str_label);
         if (emit_is_pe) x64_emit_print_str_pe(); else x64_emit_print_str_elf();
     }
+    if (ast_uses_new(root)) {
+        if (emit_is_pe || out_freestanding) die("own types require ELF userspace output", AST_NEW_LINE);
+        out_new_label = emit_new_label(); emit_put_label(out_new_label);
+        x64_emit_new_elf();
+        out_drop_label = emit_new_label(); emit_put_label(out_drop_label);
+        x64_emit_drop_elf();
+    }
     emit_lit_label = emit_new_label();
 
     for (int i = 0; i < root->data.block.count; i++) {
@@ -2342,15 +2999,19 @@ static void x64_generate(struct AST_NODE *root) {
         if (!out_naked) pp = x64_emit_prologue();
         sym_nlocal = 0; sym_frame_off = 0; sym_frame_min = 0;
         if (f->data.function.pcount > 0 && !out_naked) {
+            struct TYPE *pt = f->data.function.ptypes ? f->data.function.ptypes[0] : &TYPE_INT;
             EMIT(0x48, 0x89, 0xF8);
-            int off = sym_local_add(f->data.function.params[0], &TYPE_INT)->off;
-            EMIT(0x48, 0x89); x64_rbp_disp(0, off);
+            int off = sym_local_add(f->data.function.params[0], pt)->off;
+            if (type_is_char(pt)) { EMIT(0x88); x64_rbp_disp(0, off); }
+            else { EMIT(0x48, 0x89); x64_rbp_disp(0, off); }
         }
         if (f->data.function.pcount > 0 && !out_naked)
             for (int k = 1; k < f->data.function.pcount; k++) {
-                int off = sym_local_add(f->data.function.params[k], &TYPE_INT)->off;
+                struct TYPE *pt = f->data.function.ptypes ? f->data.function.ptypes[k] : &TYPE_INT;
+                int off = sym_local_add(f->data.function.params[k], pt)->off;
                 EMIT(0x48, 0x8B); x64_rbp_disp(0, 16 + 8 * (k - 1));
-                EMIT(0x48, 0x89); x64_rbp_disp(0, off);
+                if (type_is_char(pt)) { EMIT(0x88); x64_rbp_disp(0, off); }
+                else { EMIT(0x48, 0x89); x64_rbp_disp(0, off); }
             }
         x64_gen_stmt(f->data.function.body);
         if (!out_naked) { EMIT(0xC9, 0xC3); x64_patch_prologue(pp); }
@@ -2400,7 +3061,13 @@ static int opt_has_side_effect(struct AST_NODE *n) {
     switch (n->type) {
         case NODE_ASSIGN:
         case NODE_CALL:
+        case NODE_NEW:
+        case NODE_DROP:
             return 1;
+        case NODE_ARRAYLIT:
+            for (int i = 0; i < n->data.arraylit.count; i++)
+                if (opt_has_side_effect(n->data.arraylit.args[i])) return 1;
+            return 0;
         case NODE_BINARY:
             return opt_has_side_effect(n->data.binary.left) || opt_has_side_effect(n->data.binary.right);
         case NODE_NOT: case NODE_BNOT: case NODE_ADDR: case NODE_DEREF:
@@ -3234,7 +3901,10 @@ static void opt_dce_block(struct AST_NODE *b, int top) {
 static int opt_tco_id;
 
 static int tco_is_tail(struct AST_NODE *n, const char *fname, int pcount) {
-    if (!n || n->type != NODE_CALL || strcmp(n->data.call.name, fname)) return 0;
+    if (!n || n->type != NODE_CALL) return 0;
+    const char *nm = n->data.call.name;
+    size_t fl = strlen(fname);
+    return !memcmp(nm, fname, fl) && !nm[fl];
     if (n->data.call.acount != pcount) return 0;
     for (int i = 0; i < n->data.call.acount; i++)
         if (!opt_is_pure(n->data.call.args[i])) return 0;
@@ -3851,17 +4521,16 @@ static void lex_load_file(const char *path, struct TOKEN **tokens, int *tcnt, in
     struct TOKEN *t = lex_source(path, &n);
     for (int i = 0; i < n; i++) {
         if (t[i].type == TOK_EOF) continue;
-        if (t[i].type == TOK_AT && i + 3 < n && t[i + 1].type == TOK_IDENTIFIER &&
-            !strcmp(t[i + 1].text, "import") && t[i + 2].type == TOK_STR &&
-            t[i + 3].type == TOK_SEMICOLON) {
-            const char *s = t[i + 2].text;
+        if (t[i].type == TOK_IMPORT && i + 2 < n && t[i + 1].type == TOK_STR &&
+            t[i + 2].type == TOK_SEMICOLON) {
+            const char *s = t[i + 1].text;
             int len = (int)strlen(s);
             char nm[512], full[4096];
             if (len >= 2) snprintf(nm, sizeof nm, "%.*s", len - 2, s + 1);
             else nm[0] = 0;
             drv_resolve_path(path, nm, full);
             if (!drv_import_seen(full)) { drv_import_mark(full); lex_load_file(full, tokens, tcnt, tcap); }
-            i += 3;
+            i += 2;
             continue;
         }
         PUSH(*tokens, *tcnt, *tcap, t[i]);
@@ -4039,6 +4708,7 @@ static struct TYPE *ir_var_ty(const char *nm) {
 
 static struct TYPE *ir_struct_of(struct AST_NODE *b, int arrow) {
     struct TYPE *bt = ir_expr_ty(b);
+    if (bt->kind == 4) { bt = bt->base; if (bt->kind == 1) { bt = bt->base; arrow = 0; } }
     if (arrow) { if (bt->kind != 1) die("-> applied to non-pointer", b->line); bt = bt->base; }
     if (!bt || bt->kind != 3) die("member access on non-struct", b->line);
     return bt;
@@ -4051,6 +4721,7 @@ static struct TYPE *ir_expr_ty(struct AST_NODE *n) {
     switch (n->type) {
         case NODE_VARIABLE: return ir_var_ty(n->data.variable.name);
         case NODE_STR:      return type_pointer(&TYPE_CHAR);
+        case NODE_NEW:      return type_own(n->data.new_node.ty);
         case NODE_DEREF:  { struct TYPE *t = ir_expr_ty(n->data.unary.value); return t->kind ? t->base : &TYPE_INT; }
         case NODE_INDEX:  { struct TYPE *t = ir_expr_ty(n->data.index.base); return t->kind ? t->base : &TYPE_INT; }
         case NODE_ADDR:     return type_pointer(ir_expr_ty(n->data.unary.value));
@@ -4067,19 +4738,29 @@ static struct IR_VALUE ir_lower_addr(struct IR_FUNC *f, struct AST_NODE *n) {
     switch (n->type) {
         case NODE_VARIABLE: {
             struct IR_VALUE p; enum IR_TYPE ty;
-            if (ir_lookup(n->data.variable.name, &p, &ty)) return p;
+            if (ir_lookup(n->data.variable.name, &p, &ty)) {
+                if (type_is_own(ir_var_ty(n->data.variable.name))) {
+                    struct IR_VALUE v = ir_load(f, ty, p);
+                    return ty == IRTY_I8 ? ir_zext(f, v) : v;
+                }
+                return p;
+            }
             if (sym_func_find(n->data.variable.name) >= 0) {
                 struct IR_VALUE v;
                 v.k = IRVK_FUNC; v.nm = n->data.variable.name; v.c = 0; v.id = 0;
                 return v;
+            }
+            if (type_is_own(ir_global_ast(n->data.variable.name))) {
+                struct IR_VALUE gp = ir_gaddr(f, n->data.variable.name);
+                return ir_load(f, ir_global_ty(n->data.variable.name), gp);
             }
             return ir_gaddr(f, n->data.variable.name);
         }
         case NODE_DEREF: return ir_lower_expr(f, n->data.unary.value);
         case NODE_INDEX: {
             struct TYPE *bt = ir_expr_ty(n->data.index.base);
-            if (bt->kind == 0 && n->data.index.base->type == NODE_VARIABLE) die("indexing non-pointer value (use 'let T* q = p')", n->line);
-            struct IR_VALUE base = bt->kind == 1 || n->data.index.base->type == NODE_BINARY ? ir_lower_expr(f, n->data.index.base) : ir_lower_addr(f, n->data.index.base);
+            if (bt->kind == 0 && n->data.index.base->type == NODE_VARIABLE) die("indexing non-pointer value (use 'let q: *int = p;')", n->line);
+            struct IR_VALUE base = bt->kind == 1 || bt->kind == 4 || n->data.index.base->type == NODE_BINARY ? ir_lower_expr(f, n->data.index.base) : ir_lower_addr(f, n->data.index.base);
             struct IR_VALUE iv = ir_lower_expr(f, n->data.index.index);
             int es = type_size(ir_expr_ty(n));
             if (es != 1 && es != 8) iv = ir_bin(f, IRBIN_MUL, iv, ir_const(es));
@@ -4089,7 +4770,8 @@ static struct IR_VALUE ir_lower_addr(struct IR_FUNC *f, struct AST_NODE *n) {
         case NODE_MEMBER: {
             struct TYPE_FIELD *fl = type_find_field(ir_struct_of(n->data.member.base, n->data.member.arrow), n->data.member.field);
             if (!fl) die("no such field", n->line);
-            struct IR_VALUE base = n->data.member.arrow ? ir_lower_expr(f, n->data.member.base) : ir_lower_addr(f, n->data.member.base);
+            int own = ir_expr_ty(n->data.member.base)->kind == 4;
+            struct IR_VALUE base = (n->data.member.arrow || own) ? ir_lower_expr(f, n->data.member.base) : ir_lower_addr(f, n->data.member.base);
             if (fl->off) return ir_bin(f, IRBIN_ADD, base, ir_const(fl->off));
             return base;
         }
@@ -4219,6 +4901,27 @@ static struct IR_VALUE ir_lower_expr(struct IR_FUNC *f, struct AST_NODE *n) {
             ir_store(f, lt, rhs, p);
             return rhs;
         }
+        case NODE_NEW: {
+            if (emit_is_pe || out_freestanding) die("own types require ELF userspace output", n->line);
+            struct IR_INSN *in = ir_emit(f, IROP_CALL);
+            in->dst = ir_nreg++; in->ty = IRTY_I64;
+            in->nm = "__lgc_alloc";
+            in->nargs = 1;
+            in->args = malloc(sizeof(struct IR_VALUE));
+            in->args[0] = ir_const(type_size(n->data.new_node.ty));
+            return ir_reg(in->dst);
+        }
+        case NODE_DROP: {
+            if (emit_is_pe || out_freestanding) die("own types require ELF userspace output", n->line);
+            struct IR_VALUE v = ir_lower_expr(f, n->data.drop_node.value);
+            struct IR_INSN *in = ir_emit(f, IROP_CALL);
+            in->dst = ir_nreg++; in->ty = IRTY_I64;
+            in->nm = "__lgc_drop";
+            in->nargs = 1;
+            in->args = malloc(sizeof(struct IR_VALUE));
+            in->args[0] = v;
+            return ir_reg(in->dst);
+        }
         case NODE_CALL: {
             const char *nm = n->data.call.name;
             int na = n->data.call.acount;
@@ -4269,20 +4972,13 @@ static struct IR_VALUE ir_lower_expr(struct IR_FUNC *f, struct AST_NODE *n) {
                 }
                 if (!strcmp(nm, "ld32") && na == 1) {
                     struct IR_VALUE v = ir_lower_expr(f, n->data.call.args[0]);
-                    struct IR_INSN *in = ir_emit(f, IROP_LOAD);
-                    in->ty = IRTY_I32; in->dst = ir_nreg++;
-                    in->a = v;
-                    return ir_reg(in->dst);
+                    struct IR_INSN *in = ir_emit(f, IROP_LOAD); in->ty = IRTY_I32; in->dst = ir_nreg++; in->a = v; return ir_reg(in->dst);
                 }
                 if (!strcmp(nm, "st32") && na == 2) {
                     struct IR_VALUE v = ir_lower_expr(f, n->data.call.args[1]);
                     struct IR_VALUE p = ir_lower_expr(f, n->data.call.args[0]);
-                    struct IR_INSN *in = ir_emit(f, IROP_STORE);
-                    in->ty = IRTY_I32;
-                    in->a = v; in->b = p;
-                    struct IR_INSN *cp = ir_emit(f, IROP_COPY);
-                    cp->ty = IRTY_I64; cp->dst = ir_nreg++; cp->a = v;
-                    return ir_reg(cp->dst);
+                    struct IR_INSN *in = ir_emit(f, IROP_STORE); in->ty = IRTY_I32; in->a = v; in->b = p;
+                    struct IR_INSN *cp = ir_emit(f, IROP_COPY); cp->ty = IRTY_I64; cp->dst = ir_nreg++; cp->a = v; return ir_reg(cp->dst);
                 }
                 die("call to undefined function (IR backend)", n->line);
             }
@@ -4319,7 +5015,17 @@ static void ir_lower_stmt(struct IR_FUNC *f, struct AST_NODE *n) {
             enum IR_TYPE ty = ir_ty(ast);
             long bytes = (ast->kind == 2 || ast->kind == 3) ? type_size(ast) : 8;
             struct IR_VALUE p = ir_alloca(f, ty, bytes);
-            if (n->data.let.value) {
+            if (n->data.let.value && n->data.let.value->type == NODE_ARRAYLIT && ast->kind == 2) {
+                struct AST_NODE *lit = n->data.let.value;
+                struct TYPE *e = ast->base;
+                int esz = type_size(e);
+                for (int i = 0; i < lit->data.arraylit.count; i++) {
+                    struct IR_VALUE v = ir_lower_expr(f, lit->data.arraylit.args[i]);
+                    if (ir_is_char_ty(e)) v = ir_trunc(f, v);
+                    struct IR_VALUE ep = i ? ir_bin(f, IRBIN_ADD, p, ir_const(i * esz)) : p;
+                    ir_store(f, ir_is_char_ty(e) ? IRTY_I8 : IRTY_I64, v, ep);
+                }
+            } else if (n->data.let.value) {
                 struct IR_VALUE v = ir_lower_expr(f, n->data.let.value);
                 if (ty == IRTY_I8) v = ir_trunc(f, v);
                 ir_store(f, ty, v, p);
@@ -4540,11 +5246,12 @@ static void ir_lower_function(struct AST_NODE *n) {
     ir_symn = 0;
     for (int i = 0; i < n->data.function.pcount; i++) {
         if (f->naked) continue;
+        struct TYPE *pt = n->data.function.ptypes ? n->data.function.ptypes[i] : &TYPE_INT;
         struct IR_VALUE param = ir_reg(ir_nreg++);
         struct IR_VALUE p = ir_alloca(f, IRTY_I64, 8);
         ir_store(f, IRTY_I64, param, p);
         if (i < 16) f->preg[i] = param.id;
-        ir_bind(n->data.function.params[i], p, IRTY_I64, &TYPE_INT);
+        ir_bind(n->data.function.params[i], p, IRTY_I64, pt);
     }
     ir_lower_stmt(f, n->data.function.body);
     if (!ir_terminated(f)) {
@@ -4569,6 +5276,11 @@ static void ir_lower_program(struct AST_NODE *root) {
             SYM_FUNCS[sym_nfunc++] = (typeof(SYM_FUNCS[0])){ n->data.function.name, 0, n->data.function.pcount };
         }
     }
+    if (ast_uses_new(root)) {
+        if (emit_is_pe || out_freestanding) die("own types require ELF userspace output", AST_NEW_LINE);
+        SYM_FUNCS[sym_nfunc++] = (typeof(SYM_FUNCS[0])){ "__lgc_alloc", 0, 1 };
+        SYM_FUNCS[sym_nfunc++] = (typeof(SYM_FUNCS[0])){ "__lgc_drop", 0, 1 };
+    }
     sym_func_hash_build();
     for (int i = 0; i < root->data.block.count; i++) {
         struct AST_NODE *n = root->data.block.stmts[i];
@@ -4585,6 +5297,19 @@ static void ir_lower_program(struct AST_NODE *root) {
             if (!n->data.let.value) continue;
             for (int g = 0; g < ir_nglob; g++) {
                 if (!strcmp(ir_globals[g].nm, n->data.let.name)) {
+                    if (n->data.let.ty->kind == 2 && n->data.let.value->type == NODE_ARRAYLIT) {
+                        struct AST_NODE *lit = n->data.let.value;
+                        struct TYPE *e = n->data.let.ty->base;
+                        int esz = type_size(e);
+                        for (int k = 0; k < lit->data.arraylit.count; k++) {
+                            struct IR_VALUE v = ir_lower_expr(emit_entry_off, lit->data.arraylit.args[k]);
+                            if (ir_is_char_ty(e)) v = ir_trunc(emit_entry_off, v);
+                            struct IR_VALUE gp = ir_gaddr(emit_entry_off, n->data.let.name);
+                            struct IR_VALUE ep = k ? ir_bin(emit_entry_off, IRBIN_ADD, gp, ir_const(k * esz)) : gp;
+                            ir_store(emit_entry_off, ir_is_char_ty(e) ? IRTY_I8 : IRTY_I64, v, ep);
+                        }
+                        break;
+                    }
                     struct IR_VALUE v = ir_lower_expr(emit_entry_off, n->data.let.value);
                     if (ir_globals[g].ty == IRTY_I8) v = ir_trunc(emit_entry_off, v);
                     struct IR_VALUE p = ir_gaddr(emit_entry_off, n->data.let.name);
@@ -5377,9 +6102,7 @@ static void ircg_alloc_func(struct IR_FUNC *f, struct IR_ALLOC *al) {
         if (seen[i] && al->reg[i] < 0) { fr += 8; al->slot[i] = -fr; }
     al->framesz = ((fr + 15) & ~15L) - 8L * al->nsaved;
 
-    free(seen);
-    free(lv);
-    free(uc);
+    free(seen); free(lv); free(uc);
     free(bset_use); free(bset_def); free(bset_in); free(bset_out);
     free(blast); free(bfirst); free(dv); free(dn);
 }
@@ -5970,6 +6693,11 @@ static void ircg_generate(struct AST_NODE *root) {
         if (fi < 0) die("undefined function", fd->line);
         SYM_FUNCS[fi].lab = emit_new_label();
     }
+    if (ast_uses_new(root)) {
+        out_new_label = emit_new_label(); out_drop_label = emit_new_label();
+        int fi = sym_func_find("__lgc_alloc"); if (fi >= 0) SYM_FUNCS[fi].lab = out_new_label;
+        fi = sym_func_find("__lgc_drop"); if (fi >= 0) SYM_FUNCS[fi].lab = out_drop_label;
+    }
     sym_global_hash_build();
     sym_func_hash_build();
     if (out_bin_fmt) {
@@ -5987,6 +6715,12 @@ static void ircg_generate(struct AST_NODE *root) {
         x64_emit_print_bare();
         out_print_str_label = emit_new_label(); emit_put_label(out_print_str_label);
         x64_emit_print_str_bare();
+    }
+    if (ast_uses_new(root)) {
+        emit_put_label(out_new_label);
+        x64_emit_new_elf();
+        emit_put_label(out_drop_label);
+        x64_emit_drop_elf();
     }
     emit_lit_label = emit_new_label();
     for (int i = 0; i < root->data.block.count; i++) {
@@ -6022,7 +6756,7 @@ static void x64_reset_state(void) {
     memset(SYM_FUNCS, 0, sizeof SYM_FUNCS);
     memset(EMIT_PATCHES, 0, sizeof EMIT_PATCHES);
     for (int i = 0; i < SYM_HASH_SIZE; i++) { SYM_GLOBAL_HASH[i] = -1; SYM_FUNC_HASH[i] = -1; }
-    emit_lit_label = 0; out_print_label = 0; out_print_str_label = 0; emit_pcb = 0;
+    emit_lit_label = 0; out_print_label = 0; out_print_str_label = 0; out_new_label = 0; out_drop_label = 0; emit_pcb = 0;
 }
 
 int main(int argc, char **argv) {
@@ -6034,8 +6768,8 @@ int main(int argc, char **argv) {
         if (a[0] != '-' || !a[1]) break;
         if (!strcmp(a, "-f") && ai + 1 < argc) {
             const char *v = argv[++ai];
-            cli_fmt = !strcmp(v, "bin") ? FMT_BIN : !strcmp(v, "pe") ? FMT_PE : FMT_ELF;
-            out_efi_mode = !strcmp(v, "efi");
+            cli_fmt = v[0] == 'b' ? FMT_BIN : (v[0] == 'p' ? FMT_PE : FMT_ELF);
+            out_efi_mode = v[0] == 'e';
             if (out_efi_mode) cli_fmt = FMT_PE;
         } else if (!strcmp(a, "-b") && ai + 1 < argc) cli_base = lex_number(argv[++ai]);
         else if (!strcmp(a, "-e") && ai + 1 < argc) cli_entry = argv[++ai];
@@ -6071,6 +6805,7 @@ int main(int argc, char **argv) {
     struct PARSE_STATE p = { tokens, tcnt, 0 };
     parse_advance(&p);
     struct AST_NODE *root = parse_program(&p);
+    chk_run(root);
 
     if (cli_emit_ir == 1) { ir_lower_program(root); ir_print(); return 0; }
     if (cli_emit_ir == 2) {

@@ -1,0 +1,6 @@
+// EXPECT: own fields are not supported
+type Bad = { p: own int };
+
+fn main() -> int {
+    return 0;
+}

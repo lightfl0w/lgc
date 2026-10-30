@@ -1,7 +1,7 @@
 @efi;
 const P_DBG = 0xE9;
 
-func main() {
+fn main() -> int {
     set8(AL, 85); out_al(P_DBG);
     set8(AL, 69); out_al(P_DBG);
     set8(AL, 70); out_al(P_DBG);

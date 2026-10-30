@@ -1,4 +1,4 @@
-func fac(n) {
+fn fac(n: int) -> int {
     if (n <= 1) {
         return 1;
     } else {

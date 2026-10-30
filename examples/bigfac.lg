@@ -1,11 +1,11 @@
-let int dig[80];
-let int nd = 0;
+let dig: [80]int;
+let nd = 0;
 
-func dmul(k) {
-    let int i = 0;
-    let int c = 0;
+fn dmul(k: int) -> int {
+    let i = 0;
+    let c = 0;
     while (i < nd) {
-        let int t = dig[i] * k + c;
+        let t = dig[i] * k + c;
         dig[i] = t % 10;
         c = t / 10;
         i += 1;
@@ -18,10 +18,10 @@ func dmul(k) {
     return 0;
 }
 
-func facbig(n) {
+fn facbig(n: int) -> int {
     dig[0] = 1;
     nd = 1;
-    let int k = 2;
+    let k = 2;
     while (k <= n) {
         dmul(k);
         k += 1;
@@ -29,8 +29,8 @@ func facbig(n) {
     return 0;
 }
 
-func dprint() {
-    let int i = nd;
+fn dprint() -> int {
+    let i = nd;
     while (i > 0) {
         i -= 1;
         print dig[i];

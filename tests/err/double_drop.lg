@@ -1,0 +1,7 @@
+// EXPECT: double drop
+fn main() -> int {
+    let b: own int = new int;
+    drop b;
+    drop b;
+    return 0;
+}

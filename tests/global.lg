@@ -1,10 +1,10 @@
-let char* msg;
-let int acc;
-let int counter;
-let char buf[4];
+let msg: *char;
+let acc: int;
+let counter: int;
+let buf: [4]char;
 
-func add3(a, b, c) { return a + b + c; }
-func mul(a, b) { return a * b; }
+fn add3(a: int, b: int, c: int) -> int { return a + b + c; }
+fn mul(a: int, b: int) -> int { return a * b; }
 
 msg = "globals+str+syscall ok\n";
 syscall(1, 1, msg, 24);

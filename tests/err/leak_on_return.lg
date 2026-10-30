@@ -1,0 +1,5 @@
+// EXPECT: leaks on this return
+fn main() -> int {
+    let b: own int = new int;
+    return 0;
+}

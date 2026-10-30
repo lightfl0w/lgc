@@ -1,6 +1,6 @@
-let char* argv1;
-let int s = 0;
-let int i = 0;
+let argv1: *char;
+let s: int = 0;
+let i: int = 0;
 
 for (let k = 0; k < 5; k += 1) { s += k; }
 print "s=", s, "\n";
@@ -16,7 +16,7 @@ print "AB\n";
 print 42, "\n";
 print "mix ", 1 + 1, "!\n";
 
-let int total = 0;
+let total = 0;
 for (;;) { total += 1; if (total > 4) { break; } }
 print "total=", total, "\n";
 
